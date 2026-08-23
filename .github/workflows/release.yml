@@ -1,0 +1,117 @@
+name: release
+
+# Tag releases: validate the committed prebuilt tree on both platforms
+# (configure, build examples, consumer smoke), then attach archives of
+# the tagged tree (headers + prebuilt libs + examples; no SDK source) to
+# the GitHub Release of the pushed tag.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  validate:
+    name: validate (${{ matrix.platform }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, platform: windows-x64 }
+          - { os: ubuntu-22.04, platform: ubuntu-x64 }
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Consumer smoke (Windows)
+        if: matrix.platform == 'windows-x64'
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          New-Item -ItemType Directory -Force smoke-check | Out-Null
+          Set-Location smoke-check
+          @'
+          cmake_minimum_required(VERSION 3.18)
+          project(consumer_smoke CXX)
+          file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" SHIDOU_ROOT)
+          set(SHIDOU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          add_subdirectory("${SHIDOU_ROOT}" shidou)
+          add_executable(consumer_smoke main.cpp)
+          target_link_libraries(consumer_smoke PRIVATE shidou::core)
+          '@ | Set-Content CMakeLists.txt
+          @'
+          #include "shidou/robot/robot.h"
+          int main() {
+              shidou::comm::ZenohConfig cfg;
+              cfg.robot_address = "";   // standalone peer session, no router needed
+              cfg.mode = "peer";
+              cfg.enable_scouting = false;
+              shidou::robot::Robot robot(cfg);
+              return robot.Ready() ? 0 : 1;
+          }
+          '@ | Set-Content main.cpp
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+          $env:PATH = "$env:GITHUB_WORKSPACE\bin\win;$env:PATH"
+          ./build/Release/consumer_smoke.exe
+
+      - name: Consumer smoke (Ubuntu)
+        if: matrix.platform == 'ubuntu-x64'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -e
+          mkdir -p smoke-check && cd smoke-check
+          cat > CMakeLists.txt <<'EOF'
+          cmake_minimum_required(VERSION 3.18)
+          project(consumer_smoke CXX)
+          file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" SHIDOU_ROOT)
+          set(SHIDOU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+          add_subdirectory("${SHIDOU_ROOT}" shidou)
+          add_executable(consumer_smoke main.cpp)
+          target_link_libraries(consumer_smoke PRIVATE shidou::core)
+          EOF
+          cat > main.cpp <<'EOF'
+          #include "shidou/robot/robot.h"
+          int main() {
+              shidou::comm::ZenohConfig cfg;
+              cfg.robot_address = "";   // standalone peer session, no router needed
+              cfg.mode = "peer";
+              cfg.enable_scouting = false;
+              shidou::robot::Robot robot(cfg);
+              return robot.Ready() ? 0 : 1;
+          }
+          EOF
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake --build build --config Release
+          ./build/consumer_smoke
+
+  publish:
+    name: publish GitHub Release
+    needs: validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Archive tagged tree
+        run: |
+          git archive --format=tar.gz -o shidou_sdk-$GITHUB_REF_NAME.tar.gz HEAD
+          git archive --format=zip -o shidou_sdk-$GITHUB_REF_NAME.zip HEAD
+
+      - name: Create release with tree archives
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            shidou_sdk-$GITHUB_REF_NAME.tar.gz \
+            shidou_sdk-$GITHUB_REF_NAME.zip \
+            --generate-notes --repo "$GITHUB_REPOSITORY"
