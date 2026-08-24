@@ -10,7 +10,7 @@
 #include "shidou/robot/robot.h"
 
 int main(int argc, char** argv) {
-    std::string robot_address = "127.0.0.1:7447";
+    std::string robot_address = "192.168.168.168:7447";
     if (argc > 1) {
         robot_address = argv[1];
     }

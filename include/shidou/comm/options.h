@@ -22,7 +22,7 @@ struct ZenohConfig {
     // zenoh-plugin-ros2dds bridge listens on TCP 7447 in router mode; the
     // comm layer connects to it as "tcp/<robot_address>". Required in
     // client mode.
-    std::string robot_address = "192.168.2.123:7447";
+    std::string robot_address = "192.168.168.168:7447";
 
     // "client" (connect to a router/peer only) or "peer" (participate in
     // routing). Client mode is the normal SDK mode; peer mode is useful
