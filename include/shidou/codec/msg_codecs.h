@@ -9,6 +9,7 @@
 // offset 0, so encoding the member directly is wire-identical.
 
 #include "shidou/codec/cdr.h"
+#include "shidou/msg/body_target.h"
 #include "shidou/msg/get_state.h"
 #include "shidou/msg/gripper_target.h"
 #include "shidou/msg/header.h"
@@ -88,6 +89,25 @@ inline bool JointMITTarget::Decode(codec::ReadCursor& in) {
     return codec::ReadSeq(in, motor_ids) && codec::ReadSeq(in, positions) &&
            codec::ReadSeq(in, velocities) && codec::ReadSeq(in, torques) &&
            codec::ReadSeq(in, kps) && codec::ReadSeq(in, kds);
+}
+
+inline bool BodyTarget::Encode(codec::WriteBuffer& out) const {
+    // pushrod_id leaves the cursor 4-aligned, so position (the first 8-byte
+    // member) goes through the aligned helper: 4 bytes of padding whenever
+    // the sequences above end on a 4-mod-8 offset. The aligned helpers also
+    // cover the first element of each non-empty sequence, whose length
+    // prefix can leave the cursor misaligned the same way.
+    return codec::WriteSeq(out, wheel_ids) && codec::WriteSeq(out, velocities) &&
+           codec::WriteSeq(out, max_currents) && codec::WriteU32Aligned(out, pushrod_id) &&
+           codec::WriteF64Aligned(out, position) && codec::WriteF64Aligned(out, velocity) &&
+           codec::WriteF64Aligned(out, acceleration);
+}
+
+inline bool BodyTarget::Decode(codec::ReadCursor& in) {
+    return codec::ReadSeq(in, wheel_ids) && codec::ReadSeq(in, velocities) &&
+           codec::ReadSeq(in, max_currents) && codec::ReadU32Aligned(in, pushrod_id) &&
+           codec::ReadF64Aligned(in, position) && codec::ReadF64Aligned(in, velocity) &&
+           codec::ReadF64Aligned(in, acceleration);
 }
 
 inline bool GripperTarget::Encode(codec::WriteBuffer& out) const {

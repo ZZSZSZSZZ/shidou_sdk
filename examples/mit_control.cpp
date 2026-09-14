@@ -6,7 +6,9 @@
 // 注意：模式命令只能从 ENABLED 发起（STOP 状态只接受 enabled），
 // 切 POSITION 前先确认当前状态；扫动结束切回 ENABLED。
 //
-// 用法：mit_control [<ip>:<port>]
+// 用法：mit_control [<ip>:<port>] [namespace]
+// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
+// namespace 时显式传空串：mit_control <ip>:<port> ""
 
 #include <array>
 #include <chrono>
@@ -168,8 +170,13 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         robot_address = argv[1];
     }
+    std::string ns = "robot168";
+    if (argc > 2) {
+        ns = argv[2];
+    }
     shidou::comm::ZenohConfig cfg;
     cfg.robot_address = robot_address;
+    cfg.namespace_ = ns;
     shidou::InitLogging("info");
 
     shidou::robot::Robot robot(cfg);

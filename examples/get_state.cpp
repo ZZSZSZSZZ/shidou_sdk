@@ -1,7 +1,9 @@
 // 状态查询示例：本示例演示如何使用SDK查询机器人状态。
 // 用 GetRobotState 一次取回状态，逐字段打印。
 //
-// 用法：get_state [<ip>:<port>]
+// 用法：get_state [<ip>:<port>] [namespace]
+// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
+// namespace 时显式传空串：get_state <ip>:<port> ""
 
 #include <cstdio>
 #include <string>
@@ -14,8 +16,13 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         robot_address = argv[1];
     }
+    std::string ns = "robot168";
+    if (argc > 2) {
+        ns = argv[2];
+    }
     shidou::comm::ZenohConfig cfg;
     cfg.robot_address = robot_address;
+    cfg.namespace_ = ns;
     shidou::InitLogging("info");
 
     shidou::robot::Robot robot(cfg);

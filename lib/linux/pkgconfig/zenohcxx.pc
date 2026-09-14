@@ -1,0 +1,7 @@
+prefix=/usr/local
+
+Name: zenohcxx
+Description: 
+URL: 
+Version: 1.10.0
+Cflags: -I${prefix}/include

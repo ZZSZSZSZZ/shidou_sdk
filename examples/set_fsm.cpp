@@ -4,50 +4,29 @@
 //
 // 初始状态用 GetRobotState 查询，不假设订阅缓存里已有 fsm_state 样本。
 //
-// 用法：set_fsm [<ip>:<port>]
+// 用法：set_fsm [<ip>:<port>] [namespace]
+// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
+// namespace 时显式传空串：set_fsm <ip>:<port> ""
 
 #include <cstdio>
 #include <string>
 
+#include "example_common.h"
 #include "shidou/comm/zenoh_factory.h"
 #include "shidou/robot/robot.h"
-
-#if defined(_WIN32)
-#include <conio.h>
-#else
-#include <termios.h>
-#include <unistd.h>
-#endif
-
-namespace {
-
-// 读取一次无缓冲按键；stdin 关闭时返回 EOF（脚本可以管道输入）。Ctrl+C
-// 要么以 CTRL_C_EVENT 信号直接终止进程，要么以 0x03 按键码出现（由调用方按退出处理）。
-int WaitKey() {
-#if defined(_WIN32)
-    return _getch();
-#else
-    struct termios old_t {};
-    struct termios new_t {};
-    tcgetattr(STDIN_FILENO, &old_t);
-    new_t = old_t;
-    new_t.c_lflag &= ~(ICANON | ECHO);
-    tcsetattr(STDIN_FILENO, TCSANOW, &new_t);
-    const int c = std::getchar();
-    tcsetattr(STDIN_FILENO, TCSANOW, &old_t);
-    return c;
-#endif
-}
-
-} // namespace
 
 int main(int argc, char** argv) {
     std::string robot_address = "192.168.168.168:7447";
     if (argc > 1) {
         robot_address = argv[1];
     }
+    std::string ns = "robot168";
+    if (argc > 2) {
+        ns = argv[2];
+    }
     shidou::comm::ZenohConfig cfg;
     cfg.robot_address = robot_address;
+    cfg.namespace_ = ns;
     shidou::InitLogging("info");
 
     shidou::robot::Robot robot(cfg);
@@ -68,18 +47,12 @@ int main(int argc, char** argv) {
 
     int toggles = 0;
     for (;;) {
-        // Windows 下 _getch 的回车是 '\r'，POSIX 原始模式是 '\n'；其余按键一律忽略。
-        int c = 0;
-        while (c != '\r' && c != '\n') {
-            c = WaitKey();
-            // processed input 关闭时（ConPTY 宿主），Ctrl+C 不会产生 CTRL_C_EVENT 信号而是以 0x03 按键到达；
-            // Ctrl+Z 是传统 EOF 键——两者与 stdin 关闭同等处理，直接退出。
-            if (c == EOF || c == 0x03 || c == 0x1a) {
-                std::printf("toggled %d times, final fsm_state=%s\n", toggles,
-                            robot.FsmState().c_str());
-                shidou::comm::ZenohFactory::Instance().Shutdown();
-                return 0;
-            }
+        // 回车 = 切换一次；stdin 关闭 / Ctrl+C / Ctrl+Z = 退出（见 example_common.h）。
+        if (!example::WaitEnter()) {
+            std::printf("toggled %d times, final fsm_state=%s\n", toggles,
+                        robot.FsmState().c_str());
+            shidou::comm::ZenohFactory::Instance().Shutdown();
+            return 0;
         }
         const bool ok = stopped ? robot.Enable() : robot.Stop();
         if (ok) {

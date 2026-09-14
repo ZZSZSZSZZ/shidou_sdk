@@ -5,7 +5,9 @@
 // 收敛观察结束后由示例主动 Stop 退出。收敛判定仅供参考：电机不在位时
 // 反馈永远不动，预算超时后直接 Stop。
 //
-// 用法：trajectory [<ip>:<port>]
+// 用法：trajectory [<ip>:<port>] [namespace]
+// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
+// namespace 时显式传空串：trajectory <ip>:<port> ""
 
 #include <chrono>
 #include <cmath>
@@ -42,8 +44,13 @@ int main(int argc, char** argv) {
     if (argc > 1) {
         robot_address = argv[1];
     }
+    std::string ns = "robot168";
+    if (argc > 2) {
+        ns = argv[2];
+    }
     shidou::comm::ZenohConfig cfg;
     cfg.robot_address = robot_address;
+    cfg.namespace_ = ns;
     shidou::InitLogging("info");
 
     shidou::robot::Robot robot(cfg);

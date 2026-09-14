@@ -9,8 +9,8 @@
 //   - empty segments are rejected, as are the zenoh wildcard characters
 //     '?', '*' and '#' (they would silently change routing)
 //
-// Example: namespace "robot1", topic "/joint_states"
-//        -> "robot1/joint_states"
+// Example: namespace "/robot1", topic "/joint_states"
+//        -> "robot1/joint_states" (both leading slashes are stripped)
 
 #include <string>
 

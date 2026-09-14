@@ -1,4 +1,4 @@
-# shidou_sdk
+# ShiDou SDK
 
 使用 Eclipse Zenoh 为底层通信协议的高性能、跨平台 C++ 机器人客户端。
 
@@ -10,7 +10,8 @@ include/         # shidou_core 头文件 + spdlog / zenoh-cpp / zenoh-c 头文�
 lib/win/         # Windows（VS2022 x64 Release）：shidou_core.lib + zenoh-c 库与 cmake 配置
 lib/linux/       # Linux（Ubuntu 22.04 x86_64 Release）：libshidou_core.a + zenoh-c 库与 cmake 配置
 bin/win/         # zenohc.dll
-examples/        # 控制示例（set_fsm / mit_control / get_state / get_joint / trajectory）
+examples/        # 控制示例（set_fsm / mit_control / pushrod_control / chassis_control /
+                 # get_state / get_joint / trajectory）
 ```
 
 ## 构建
@@ -47,7 +48,7 @@ C++17、第三方依赖与 zenoh 链接项随 `shidou::core` 自动传播。
 shidou::comm::ZenohConfig cfg;
 cfg.robot_address = "<robot-ip>:7447";
 shidou::robot::Robot robot(cfg);
-// robot.Ready() / Enable() / SetMode() / SendJoint*Target() /
+// robot.Ready() / Enable() / SetMode() / SendJoint*Target() / SendBodyTarget() /
 // UploadTrajectory() / GetRobotState()
 ```
 

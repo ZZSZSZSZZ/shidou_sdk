@@ -5,7 +5,9 @@
 //
 // 当样本停止到达（如网络异常中断）时，缓存的最后一帧会带着不断增长的 age 和 STALE 标记继续打印，并触发一次 [WARN] 警告；
 //
-// 用法：get_joint [<ip>:<port>] [seconds]
+// 用法：get_joint [seconds] [<ip>:<port>] [namespace]
+// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
+// namespace 时显式传空串：get_joint <seconds> <ip>:<port> ""
 
 #include <atomic>
 #include <chrono>
@@ -47,17 +49,23 @@ int main(int argc, char** argv) {
     // 拖到进程退出才落盘）。
     std::setvbuf(stdout, nullptr, _IONBF, 0);
 
-    std::string robot_address = "192.168.168.168:7447";
-    if (argc > 1) {
-        robot_address = argv[1];
-    }
     // 运行时长（秒）；<= 0 表示一直运行到进程被杀。
     double seconds = 10.0;
-    if (argc > 2) {
-        seconds = std::atof(argv[2]);
+    if (argc > 1) {
+        seconds = std::atof(argv[1]);
     }
+    std::string robot_address = "192.168.168.168:7447";
+    if (argc > 2) {
+        robot_address = argv[2];
+    }
+    std::string ns = "robot168";
+    if (argc > 3) {
+        ns = argv[3];
+    }
+
     shidou::comm::ZenohConfig cfg;
     cfg.robot_address = robot_address;
+    cfg.namespace_ = ns;
     shidou::InitLogging("info");
 
     shidou::robot::Robot robot(cfg);

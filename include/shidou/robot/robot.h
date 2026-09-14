@@ -48,6 +48,7 @@ inline constexpr const char* kTargetCsp = "arm_control_node/target_joint_csp";
 inline constexpr const char* kTargetPosition = "arm_control_node/target_joint_position";
 inline constexpr const char* kTargetMit = "arm_control_node/target_joint_mit";
 inline constexpr const char* kTargetGripper = "arm_control_node/target_gripper";
+inline constexpr const char* kTargetBody = "arm_control_node/target_body";
 inline constexpr const char* kServiceGetState = "arm_control_node/get_state";
 inline constexpr const char* kServiceJointTrajectory = "arm_control_node/joint_trajectory";
 } // namespace topics
@@ -83,6 +84,7 @@ public:
     bool SendJointCSPTarget(const msg::JointCSPTarget& target);
     bool SendJointPositionTarget(const msg::JointPositionTarget& target);
     bool SendGripperTarget(const msg::GripperTarget& target);
+    bool SendBodyTarget(const msg::BodyTarget& target);
 
     // Uploads a trajectory through the joint_trajectory service and
     // returns the robot's acceptance. Run it with SetMode(kTrajectory)
@@ -133,6 +135,7 @@ private:
     std::shared_ptr<comm::ZenohPublisher<msg::JointCSPTarget>> csp_pub_;
     std::shared_ptr<comm::ZenohPublisher<msg::JointPositionTarget>> pos_pub_;
     std::shared_ptr<comm::ZenohPublisher<msg::GripperTarget>> grip_pub_;
+    std::shared_ptr<comm::ZenohPublisher<msg::BodyTarget>> body_pub_;
     std::shared_ptr<comm::ZenohClient<msg::GetStateRequest, msg::GetStateResponse>>
         get_state_cli_;
     std::shared_ptr<comm::ZenohClient<msg::JointTrajectoryRequest, msg::JointTrajectoryResponse>>
