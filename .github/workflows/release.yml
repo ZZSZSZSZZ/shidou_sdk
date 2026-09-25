@@ -1,9 +1,10 @@
 name: release
 
-# Tag releases: validate the committed prebuilt tree on both platforms
-# (configure, build examples, consumer smoke), then attach archives of
-# the tagged tree (headers + prebuilt libs + examples; no SDK source) to
-# the GitHub Release of the pushed tag.
+# Tag releases: validate the committed prebuilt tree on all three
+# payloads (Windows x64, Linux x86_64 and aarch64) -- configure, build
+# examples, consumer smoke -- then attach archives of the tagged tree
+# (headers + prebuilt libs + examples; no SDK source) to the GitHub
+# Release of the pushed tag.
 
 on:
   push:
@@ -21,6 +22,7 @@ jobs:
         include:
           - { os: windows-latest, platform: windows-x64 }
           - { os: ubuntu-22.04, platform: ubuntu-x64 }
+          - { os: ubuntu-22.04-arm, platform: ubuntu-arm64 }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     steps:
@@ -64,8 +66,8 @@ jobs:
           $env:PATH = "$env:GITHUB_WORKSPACE\bin\win;$env:PATH"
           ./build/Release/consumer_smoke.exe
 
-      - name: Consumer smoke (Ubuntu)
-        if: matrix.platform == 'ubuntu-x64'
+      - name: Consumer smoke (Linux)
+        if: matrix.platform != 'windows-x64'
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |

@@ -1,25 +1,40 @@
 cmake_minimum_required(VERSION 3.18)
 
 # Prebuilt distribution: this repository carries the SDK headers and
-# committed static libraries, no SDK source. The library is selected
-# per platform and all third-party dependencies (zenoh-c prebuilt,
-# spdlog / zenoh-cpp headers) are vendored, so configure needs no
-# network access.
+# committed static libraries, no SDK source. The library is selected per
+# platform and architecture and all third-party dependencies (zenoh-c
+# prebuilt, spdlog / zenoh-cpp headers) are vendored, so configure needs
+# no network access.
 #
 # The version placeholder is substituted by ci/build_dist.py when the
 # tree is assembled from the source repository; this file is not meant
 # to be configured directly from ci/dist_template/.
-project(shidou_sdk VERSION 1.2.2 LANGUAGES CXX)
+project(shidou_sdk VERSION 1.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 option(SHIDOU_BUILD_EXAMPLES "Build example applications" ON)
 
+# Processor names differ between hosts, generators and toolchain files
+# (x86_64 / AMD64 / arm64 / aarch64), so normalize and compare for
+# equality: a pattern match on "arm" would also accept armv7l.
+string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SHIDOU_PROC)
+
 if(WIN32)
+    if(SHIDOU_PROC STREQUAL "arm64" OR SHIDOU_PROC STREQUAL "aarch64")
+        message(FATAL_ERROR "No prebuilt shidou_core for Windows on ARM64.")
+    endif()
     set(SHIDOU_PLATFORM win)
 elseif(UNIX AND NOT APPLE)
-    set(SHIDOU_PLATFORM linux)
+    if(SHIDOU_PROC STREQUAL "x86_64" OR SHIDOU_PROC STREQUAL "amd64")
+        set(SHIDOU_PLATFORM linux)
+    elseif(SHIDOU_PROC STREQUAL "aarch64" OR SHIDOU_PROC STREQUAL "arm64")
+        set(SHIDOU_PLATFORM linux-arm64)
+    else()
+        message(FATAL_ERROR
+            "No prebuilt shidou_core for this processor: ${CMAKE_SYSTEM_PROCESSOR}")
+    endif()
 else()
     message(FATAL_ERROR "No prebuilt shidou_core for this platform.")
 endif()
@@ -28,8 +43,8 @@ set(SHIDOU_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${SHIDOU_PLATFORM}")
 # zenoh-c: vendored prebuilt release. The target is recreated here
 # (instead of find_package) because the official package config
 # resolves paths relative to its own location, which does not survive
-# the per-platform lib/{win,linux} nesting of this repository. The
-# properties mirror the official config's shared target.
+# the per-platform lib/{win,linux,linux-arm64} nesting of this
+# repository. The properties mirror the official config's shared target.
 if(NOT TARGET zenohc::lib)
     add_library(zenohc::lib SHARED IMPORTED GLOBAL)
     set_target_properties(zenohc::lib PROPERTIES
@@ -40,6 +55,8 @@ if(NOT TARGET zenohc::lib)
             IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/bin/win/zenohc.dll"
             IMPORTED_IMPLIB "${SHIDOU_LIB_DIR}/zenohc.dll.lib")
     else()
+        # Both Linux platforms share this branch: the architecture is
+        # separated by SHIDOU_LIB_DIR, not by the target layout.
         set_target_properties(zenohc::lib PROPERTIES
             IMPORTED_LOCATION "${SHIDOU_LIB_DIR}/libzenohc.so")
     endif()

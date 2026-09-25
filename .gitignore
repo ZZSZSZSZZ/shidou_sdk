@@ -1,5 +1,6 @@
 # Distribution tree: committed payloads only, nothing generated.
 build/
+build-*/
 .vs/
 out/
 *.baiduyun.uploading.cfg

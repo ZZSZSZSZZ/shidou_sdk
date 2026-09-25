@@ -9,6 +9,7 @@ CMakeLists.txt   # 构建示例（可用 SHIDOU_BUILD_EXAMPLES=OFF 关闭）
 include/         # shidou_core 头文件 + spdlog / zenoh-cpp / zenoh-c 头文件
 lib/win/         # Windows（VS2022 x64 Release）：shidou_core.lib + zenoh-c 库与 cmake 配置
 lib/linux/       # Linux（Ubuntu 22.04 x86_64 Release）：libshidou_core.a + zenoh-c 库与 cmake 配置
+lib/linux-arm64/ # Linux（Ubuntu 22.04 aarch64 Release）：同上，aarch64 版本
 bin/win/         # zenohc.dll
 examples/        # 控制示例（set_fsm / mit_control / pushrod_control / chassis_control /
                  # get_state / get_joint）
@@ -30,12 +31,16 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
+x86_64 与 aarch64 通用：CMake 按 `CMAKE_SYSTEM_PROCESSOR` 自动选取 `lib/linux/`
+或 `lib/linux-arm64/`，命令相同；目标处理器不在支持列表内时配置阶段即报错。在
+x86_64 主机上为 aarch64 交叉构建需自备交叉工具链（分发树内不含工具链文件）。
+
 Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁；但手动部署时需手动放
 到 exe 同目录或加入 PATH）。
 
 ## 运行示例
 
-可执行文件在构建目录下（Windows：`build/Release/`；Linux：`build/examples/`）。运行前机器人侧
+可执行文件在构建目录下（Windows：`build/Release/`；Linux：`build/`）。运行前机器人侧
 zenoh 桥须已在监听，且 namespace 与桥配置一致。
 
 共同约定：
@@ -89,8 +94,9 @@ shidou::robot::Robot robot(cfg);
 
 ## 注意事项
 
-- 预编译库为 Release-only：Windows 需 VS2022（v143 工具集）；Linux 为
-  Ubuntu 22.04 构建（GCC 11 / glibc 2.35）
+- 预编译库为 Release-only：Windows 使用 VS2022（v143 工具集）构建；Linux
+  两个架构（x86_64 / aarch64）均为 Ubuntu 22.04 构建（GCC 11 / glibc 2.35）
+- `lib/linux/` 与 `lib/linux-arm64/` 一架构一目录，跨架构混用会在链接期失败
 - 版本对应 tag；Release 页提供该版本树的 tar.gz / zip 归档
 
 ## 许可
