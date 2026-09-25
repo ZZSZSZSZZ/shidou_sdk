@@ -10,10 +10,11 @@
 // the constants and layouts here only.
 //
 // Contract:
-//   topic payload : 4-byte CDR_LE encapsulation header + CDR body, with
-//                   up to 3 zero padding bytes appended so the payload
-//                   reaches a 4-byte boundary (rmw_cyclonedds serializes
-//                   this way and the bridge forwards the padding)
+//   topic payload : 4-byte CDR_LE encapsulation header + CDR body. The
+//                   payloads observed on this wire carry the body exactly,
+//                   with no trailing bytes; the decoder still tolerates up
+//                   to 3 zero bytes, which is what padding the body to a
+//                   4-byte boundary would add
 //   service query : the SAME frame as a topic payload (encapsulation
 //                   header + request CDR body). The 16-byte rmw request
 //                   id (client guid + sequence number) never crosses the
@@ -54,10 +55,10 @@ bool EncodeTopicFrame(const T& msg, std::vector<uint8_t>& out) {
 }
 
 // Decodes a topic payload. Any other encapsulation (e.g. PL_CDR_LE) is
-// rejected: the SDK only speaks plain CDR with this bridge. The bridge
-// forwards the body exactly as rmw_cyclonedds serialized it, including
-// up to 3 zero bytes of padding appended to reach a 4-byte boundary;
-// those are accepted and ignored.
+// rejected: the SDK only speaks plain CDR with this bridge. Up to 3 zero
+// bytes after the body are accepted and ignored, which covers a body
+// padded to a 4-byte boundary; a longer or non-zero tail is a framing
+// error and fails the decode.
 template <typename T>
 bool DecodeTopicFrame(const uint8_t* data, size_t size, T& msg) {
     if (size < kTopicFrameHeaderSize ||

@@ -10,7 +10,8 @@
 //                NUL terminator, then the bytes with a final NUL --
 //                the rmw_cyclonedds serdes convention this wire carries
 //
-// Natural alignments: bool = 1, uint32/int32/float32 = 4, uint64/float64 = 8.
+// Natural alignments: bool = 1, uint16/int16 = 2, uint32/int32/float32 = 4,
+// uint64/float64 = 8.
 // Only little-endian hosts are supported; big-endian hosts are out of scope.
 
 #include <cstdint>
@@ -24,7 +25,9 @@ namespace shidou::codec {
 
 // Natural CDR alignment of an element type.
 template <typename T>
-struct CdrAlignOf : std::integral_constant<size_t, sizeof(T) >= 8 ? 8 : (sizeof(T) >= 4 ? 4 : 1)> {};
+struct CdrAlignOf
+    : std::integral_constant<size_t,
+                             sizeof(T) >= 8 ? 8 : (sizeof(T) >= 4 ? 4 : (sizeof(T) >= 2 ? 2 : 1))> {};
 
 // Sequence of fixed-size elements. Decoding rejects lengths whose element
 // bytes could not fit into the remaining payload (malformed-length defense);
@@ -153,7 +156,9 @@ inline bool WriteString(WriteBuffer& out, const std::string& s) {
     return true;
 }
 
-// Aligned primitive helpers; keep message codecs free of padding noise.
+// Aligned primitive helpers; keep message codecs free of padding noise. A
+// 16-bit scalar member has to be aligned to 2 the same way; there is no
+// helper for it because no message carries one.
 inline bool ReadU32Aligned(ReadCursor& in, uint32_t& v) { return in.Align(4) && in.ReadU32(v); }
 inline bool ReadF64Aligned(ReadCursor& in, double& v) { return in.Align(8) && in.ReadF64(v); }
 inline bool ReadBool(ReadCursor& in, bool& v) {
