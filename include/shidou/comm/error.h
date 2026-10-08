@@ -8,8 +8,8 @@ namespace shidou {
 enum class ErrorCode : int {
     kOk = 0,
     kInvalidArgument,    // bad name, keyexpr, namespace or option value
-    kNotInitialized,     // ZenohFactory::Init was not called (or was shut down)
-    kAlreadyInitialized, // repeated ZenohFactory::Init
+    kNotInitialized,     // no open session, or the robot is not ready
+    kAlreadyInitialized, // repeated Open on an already-open session
     kSessionError,       // zenoh session creation or connect failure
     kEncodeError,        // message failed to encode
     kDecodeError,        // payload failed to decode (malformed or truncated)

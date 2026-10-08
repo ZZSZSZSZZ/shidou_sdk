@@ -7,7 +7,7 @@
 //
 // Threading contract:
 //   - the user callback runs on a zenoh session thread: it must not
-//     block, and must not call Shutdown() or destroy the subscriber
+//     block, and must not close the session or destroy the subscriber
 //   - LastValue/Seq/AgeMs are safe to call from any thread, including
 //     from the callback itself
 //   - malformed payloads are dropped, counted, logged rate-limited
@@ -77,7 +77,7 @@ public:
     const std::string& Topic() const { return topic_; }
 
 private:
-    friend class ZenohFactory;
+    friend class ZenohSession;
 
     ZenohSubscriber(std::shared_ptr<zenoh::Session> session, std::string topic, Callback callback,
                     zenoh::Subscriber<void> subscriber)
@@ -109,7 +109,7 @@ private:
 
     void ReportError(ErrorCode code, const std::string& message);
 
-    // Called once by the factory after a successful declaration. Must
+    // Called once by the session after a successful declaration. Must
     // precede any sample delivery for this object.
     void ReplaceSubscriber(zenoh::Subscriber<void> subscriber) { subscriber_ = std::move(subscriber); }
 

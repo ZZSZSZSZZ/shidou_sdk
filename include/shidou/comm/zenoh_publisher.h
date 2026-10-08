@@ -43,19 +43,25 @@ public:
     }
 
     const std::string& Topic() const { return topic_; }
+    // The most recent failure of this publisher. One record is kept per
+    // object and it is not synchronized with concurrent Publish calls, so
+    // under concurrent publishing it may describe another thread's call;
+    // callers that need the record of their own call must not share the
+    // publisher (Robot's target streams rely on their one-control-thread
+    // rule for exactly this). LastError() returns a copy of the stored
+    // string.
     ErrorCode LastErrorCode() const { return last_code_; }
-    // Returns a copy: the stored message is not synchronized with
-    // concurrent operations.
     std::string LastError() const {
         std::lock_guard<std::mutex> lock(error_mutex_);
         return last_error_;
     }
 
 private:
-    friend class ZenohFactory;
+    friend class ZenohSession;
 
-    // notify_lost is injected by the factory (which owns the session-lost
-    // callback) so this class has no dependency on the factory type.
+    // notify_lost is injected by the session object that creates the
+    // publisher (which owns the session-lost callback) so this class has no
+    // dependency on the session type.
     ZenohPublisher(std::shared_ptr<zenoh::Session> session, std::string topic,
                    zenoh::Publisher publisher, std::function<void()> notify_lost)
         : session_(std::move(session)),

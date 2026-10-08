@@ -45,7 +45,7 @@ public:
     }
 
 private:
-    friend class ZenohFactory;
+    friend class ZenohSession;
 
     bool CallImpl(const TReq& req, TRes& res, std::chrono::milliseconds timeout) {
         if (!session_) {
@@ -62,8 +62,9 @@ private:
         struct CallState {
             std::promise<ErrorCode> promise;
             std::optional<TRes> decoded;
-            std::mutex mutex;         // guards decoded
+            std::mutex mutex;  // guards decoded and undecodable
             std::atomic<bool> done{false};
+            bool undecodable = false;  // an ok reply the decoder rejected
         };
         auto state = std::make_shared<CallState>();
         auto future = state->promise.get_future();
@@ -81,13 +82,24 @@ private:
                         return;
                     }
                     if (!reply.is_ok()) {
-                        return;  // non-final errors do not end the query
+                        // An error reply neither ends the query nor counts as
+                        // an answer here: it is treated as silence, so a call
+                        // whose only replies are errors ends as kNoReply (like
+                        // one with no answerer), not with the responder's
+                        // error.
+                        return;
                     }
                     TRes candidate;
                     const zenoh::Bytes& payload = reply.get_ok().get_payload();
                     auto view = payload.get_contiguous_view();
                     if (!view || !DecodeServiceReply(view->data, view->len, candidate)) {
-                        return;  // undecodable reply: keep waiting
+                        // An ok reply the decoder rejected. Remember it so the
+                        // request that saw it can end as a decode failure
+                        // instead of as "no reply"; a later decodable reply
+                        // still wins.
+                        std::lock_guard<std::mutex> lock(state->mutex);
+                        state->undecodable = true;
+                        return;
                     }
                     {
                         std::lock_guard<std::mutex> lock(state->mutex);
@@ -97,10 +109,19 @@ private:
                     state->promise.set_value(ErrorCode::kOk);
                 },
                 [state]() {
-                    // All replies are in. If none matched, finish with
-                    // kNoReply (the promise may already be satisfied).
+                    // All replies are in. A reply that was seen but rejected by
+                    // the decoder is this call's decode failure; with no reply
+                    // at all the query reached no queryable (the promise may
+                    // already be satisfied by a decodable reply).
                     if (!state->done.exchange(true)) {
-                        state->promise.set_value(ErrorCode::kNoReply);
+                        ErrorCode code = ErrorCode::kNoReply;
+                        {
+                            std::lock_guard<std::mutex> lock(state->mutex);
+                            if (state->undecodable) {
+                                code = ErrorCode::kDecodeError;
+                            }
+                        }
+                        state->promise.set_value(code);
                     }
                 },
                 std::move(opts));
@@ -125,17 +146,20 @@ private:
 
 public:
     const std::string& Service() const { return service_; }
+    // The most recent failure of this client: one record per object, not
+    // synchronized with concurrent Call calls (concurrent Calls are safe, but
+    // then the record may describe another call). LastError() returns a copy
+    // of the stored string.
     ErrorCode LastErrorCode() const { return last_code_; }
-    // Returns a copy: the stored message is not synchronized with
-    // concurrent operations.
     std::string LastError() const {
         std::lock_guard<std::mutex> lock(error_mutex_);
         return last_error_;
     }
 
 private:
-    // notify_lost is injected by the factory (which owns the session-lost
-    // callback) so this class has no dependency on the factory type.
+    // notify_lost is injected by the session object that creates the client
+    // (which owns the session-lost callback) so this class has no dependency
+    // on the session type.
     ZenohClient(std::shared_ptr<zenoh::Session> session, std::string service,
                 zenoh::KeyExpr service_keyexpr, std::chrono::milliseconds timeout,
                 std::function<void()> notify_lost)

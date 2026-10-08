@@ -1,20 +1,33 @@
 #pragma once
 
-// Telemetry cache and stale watchdog for the robot layer. OnFeedback and
-// OnFsmState are fed by the subscribers (on zenoh session threads); the
-// watchdog thread only reads the cache and fires the stale callback.
+// Robot-layer telemetry view: user hooks plus the stale watchdog. The
+// latest feedback sample, its sequence and its age are owned by the
+// comm-layer subscriber cache (ZenohSubscriber) - the single owner; this
+// class keeps no copy of its own. OnFeedback and OnFsmState are fed by the
+// subscribers (on zenoh session threads); the watchdog thread polls the
+// attached subscriber's age and fires the stale callback. Whether a sample
+// arrived since the last report is read from the source's sequence counter,
+// so the watchdog needs nothing but AttachFeedbackSource to observe fresh
+// samples.
 
 #include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <mutex>
-#include <optional>
 #include <string>
 #include <thread>
 
 #include "shidou/codec/msg_codecs.h"
 #include "shidou/robot/defaults.h"
+
+namespace shidou::comm {
+
+template <typename T>
+class ZenohSubscriber;
+
+} // namespace shidou::comm
 
 namespace shidou::robot {
 
@@ -26,13 +39,17 @@ public:
     Telemetry(const Telemetry&) = delete;
     Telemetry& operator=(const Telemetry&) = delete;
 
+    // Points the watchdog at the sample cache it reports on. Called whenever
+    // the comm objects are (re)created, under this object's lock. The weak
+    // reference does not extend the subscriber's lifetime: an expired source
+    // simply means "nothing to report". Samples already in the cache do not
+    // count as fresh: only a sample arriving after this call arms the
+    // watchdog.
+    void AttachFeedbackSource(std::weak_ptr<comm::ZenohSubscriber<msg::JointFeedback>> sub);
+
+    // Delivery hooks, fed by the subscribers on zenoh session threads.
     void OnFeedback(const msg::JointFeedback& fb);
     void OnFsmState(const std::string& state);
-
-    bool LastFeedback(msg::JointFeedback& out) const;
-    double FeedbackAgeMs() const;  // negative until the first sample
-    uint64_t FeedbackSeq() const;
-    std::string FsmState() const;
 
     // User hooks, invoked on zenoh session threads (OnFeedback/OnFsmState
     // callers); they must not block.
@@ -45,12 +62,6 @@ public:
     void SetStaleCallback(std::chrono::milliseconds age_threshold_ms,
                           std::function<void(double age_ms)> cb);
 
-    // Clears the cached samples, counters and fsm state. Called when the
-    // robot switches namespace: the previous robot's data must not be
-    // served as the new robot's state. Callbacks and watchdog settings
-    // survive.
-    void Reset();
-
     // Starts the watchdog thread; idempotent. Stop() joins it.
     void Start();
     void Stop();
@@ -59,15 +70,15 @@ private:
     void WatchdogLoop();
 
     mutable std::mutex mutex_;
-    std::optional<msg::JointFeedback> last_;
-    uint64_t seq_ = 0;
-    std::chrono::steady_clock::time_point last_ts_;
-    std::string fsm_state_;
+    std::weak_ptr<comm::ZenohSubscriber<msg::JointFeedback>> feedback_source_;
     std::function<void(const msg::JointFeedback&)> feedback_cb_;
     std::function<void(const std::string&)> fsm_cb_;
     std::chrono::milliseconds stale_threshold_{0};
     std::function<void(double)> stale_cb_;
-    bool stale_notified_ = true;  // nothing to report until a sample arrives
+    // Source sequence the watchdog last reported on; 0 means no sample has
+    // been seen yet. Reporting advances it, so a report covers one sample
+    // and the next sample arms the watchdog again.
+    uint64_t stale_reported_seq_ = 0;
     std::thread watchdog_;
     std::atomic<bool> stop_{false};
 };

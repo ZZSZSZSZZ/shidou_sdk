@@ -9,6 +9,7 @@
 // 用法：mit_control [<ip>:<port>] [namespace]
 // namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
 // namespace 时显式传空串：mit_control <ip>:<port> ""
+// 用法与缺省值也可以直接问示例：mit_control --help
 
 #include <array>
 #include <chrono>
@@ -17,7 +18,8 @@
 #include <thread>
 #include <vector>
 
-#include "shidou/comm/zenoh_factory.h"
+#include "example_common.h"
+#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
 namespace {
@@ -106,13 +108,14 @@ bool ParseArmLayout(const std::string& arm_info, ArmLayout& out) {
 }
 
 // 从 get_state 快照中找电机当前位置；快照没有该电机时回退 0 并告警。
-double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id) {
+double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id,
+                       example::Verdicts& verdicts) {
     for (size_t i = 0; i < state.motor_ids.size() && i < state.positions.size(); ++i) {
         if (state.motor_ids[i] == motor_id) {
             return state.positions[i];
         }
     }
-    std::printf("[WARN] motor %u not in get_state snapshot, sweep from 0\n", motor_id);
+    verdicts.Warn("motor %u not in get_state snapshot, sweep from 0", motor_id);
     return 0.0;
 }
 
@@ -120,7 +123,8 @@ double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id
 // 段内以实际经过时间为插值变量，睡眠抖动不累积；velocity 取段内斜率做
 // 速度前馈，kp/kd 固定为示例值。每段结束补发终点帧，保证段间衔接与
 // 最终停位精确。
-bool SweepMotor(shidou::robot::Robot& robot, uint32_t motor_id, double start) {
+bool SweepMotor(shidou::robot::Robot& robot, example::Verdicts& verdicts, uint32_t motor_id,
+                double start) {
     const std::array<double, 4> waypoints{start, kWaypointHigh, kWaypointLow, kWaypointHome};
     std::printf("motor %u: %.3f -> %.3f -> %.3f -> %.3f (%.0f s per segment)\n", motor_id,
                 waypoints[0], waypoints[1], waypoints[2], waypoints[3], kSegmentSeconds);
@@ -142,9 +146,9 @@ bool SweepMotor(shidou::robot::Robot& robot, uint32_t motor_id, double start) {
             target.kps = {kGainKp};
             target.kds = {kGainKd};
             // torques 不填 = 前馈力矩 0。
-            if (!robot.SendJointMITTarget(target)) {
-                std::printf("[FAIL] publish motor %u: %s\n", motor_id,
-                            robot.LastError().c_str());
+            const shidou::robot::Result sent = robot.SendJointMITTarget(target);
+            if (!sent) {
+                verdicts.Fail("publish motor %u: %s", motor_id, sent.message.c_str());
                 return false;
             }
             std::this_thread::sleep_for(kPeriod);
@@ -155,41 +159,24 @@ bool SweepMotor(shidou::robot::Robot& robot, uint32_t motor_id, double start) {
         end_frame.velocities = {0.0};  // 段末速度前馈清零，停在终点
         end_frame.kps = {kGainKp};
         end_frame.kds = {kGainKd};
-        if (!robot.SendJointMITTarget(end_frame)) {
-            std::printf("[FAIL] publish motor %u: %s\n", motor_id, robot.LastError().c_str());
+        const shidou::robot::Result sent = robot.SendJointMITTarget(end_frame);
+        if (!sent) {
+            verdicts.Fail("publish motor %u: %s", motor_id, sent.message.c_str());
             return false;
         }
     }
     return true;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
-    std::string robot_address = "192.168.168.168:7447";
-    if (argc > 1) {
-        robot_address = argv[1];
-    }
-    std::string ns = "robot168";
-    if (argc > 2) {
-        ns = argv[2];
-    }
-    shidou::comm::ZenohConfig cfg;
-    cfg.robot_address = robot_address;
-    cfg.namespace_ = ns;
-    shidou::InitLogging("info");
-
-    shidou::robot::Robot robot(cfg);
-    if (!robot.Ready()) {
-        std::printf("[FAIL] %s\n", robot.LastError().c_str());
-        return 1;
-    }
+// 扫动流程：查状态 → 必要时 Enable → 解析臂布局 → 切 POSITION → 依次扫动 → 切回 ENABLED。
+void SweepJoints(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
+                 example::Verdicts& verdicts) {
     // 先查状态：arm_info 决定扫动电机，fsm_state 决定是否需要先 Enable。
     shidou::robot::RobotState state;
-    if (!robot.GetRobotState(state)) {
-        std::printf("[FAIL] GetRobotState: %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result state_result = robot.GetRobotState(state);
+    if (!state_result) {
+        verdicts.Fail("GetRobotState: %s", state_result.message.c_str());
+        return;
     }
     std::printf("arm_info=%s\n", state.arm_info.c_str());
     std::printf("fsm_state=%s\n", state.fsm_state.c_str());
@@ -197,19 +184,18 @@ int main(int argc, char** argv) {
     // 模式命令只能从 ENABLED 发起（STOP 态只接受 enabled，不能直接切模式），
     // 当前不在 ENABLED 时先 Enable 握手。
     if (state.fsm_state != shidou::robot::kFsmStateEnabled) {
-        if (!robot.Enable()) {
-            std::printf("[FAIL] Enable: %s\n", robot.LastError().c_str());
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        const shidou::robot::Result enabled = robot.Enable();
+        if (!enabled) {
+            verdicts.Fail("Enable: %s", enabled.message.c_str());
+            return;
         }
         std::printf("fsm_state=%s\n", robot.FsmState().c_str());
     }
 
     ArmLayout layout;
     if (!ParseArmLayout(state.arm_info, layout)) {
-        std::printf("[FAIL] arm_info=%s: cannot parse layout/dof\n", state.arm_info.c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+        verdicts.Fail("arm_info=%s: cannot parse layout/dof", state.arm_info.c_str());
+        return;
     }
     const char* layout_name =
         layout.has_left && layout.has_right ? "dual" : (layout.has_left ? "left" : "right");
@@ -226,28 +212,32 @@ int main(int argc, char** argv) {
     }
 
     // MIT 目标由 POSITION 状态消费：先握手切入 POSITION 模式，确认后开始扫动。
-    if (!robot.SetMode(shidou::robot::ControlMode::kPosition)) {
-        std::printf("[FAIL] SetMode(POSITION): %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kPosition);
+    if (!mode) {
+        verdicts.Fail("SetMode(POSITION): %s", mode.message.c_str());
+        return;
     }
     std::printf("fsm_state=%s, sweeping %zu motor(s)\n", robot.FsmState().c_str(),
                 motors.size());
 
     for (uint32_t motor_id : motors) {
-        if (!SweepMotor(robot, motor_id, CurrentPosition(state, motor_id))) {
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        if (!SweepMotor(robot, verdicts, motor_id, CurrentPosition(state, motor_id, verdicts))) {
+            return;
         }
     }
 
     // 扫动结束切回 ENABLED，机器人回到可再次接收模式命令的状态。
-    const bool ok = robot.Enable();
-    shidou::comm::ZenohFactory::Instance().Shutdown();
-    if (!ok) {
-        std::printf("[FAIL] Enable: %s\n", robot.LastError().c_str());
-        return 1;
+    const shidou::robot::Result enabled = robot.Enable();
+    if (!enabled) {
+        verdicts.Fail("Enable: %s", enabled.message.c_str());
+        return;
     }
-    std::printf("[PASS] Enable -> fsm_state=%s\n", robot.FsmState().c_str());
-    return 0;
+    verdicts.Pass("Enable -> fsm_state=%s", robot.FsmState().c_str());
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // MIT 扫动没有自己的参数：位置参数只有 [<ip>:<port>] 与 [namespace]。
+    return example::Run(argc, argv, {}, SweepJoints);
 }

@@ -16,7 +16,7 @@ enum class Reliability {
     kBestEffort,  // target streams: newest wins (congestion DROP, DATA_HIGH)
 };
 
-// Session configuration for ZenohFactory::Init.
+// Session configuration for ZenohSession::Open.
 struct ZenohConfig {
     // Robot address to connect to, "<ip>:<port>". The robot-side
     // zenoh-plugin-ros2dds bridge listens on TCP 7447 in router mode; the

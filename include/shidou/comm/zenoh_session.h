@@ -1,11 +1,32 @@
 #pragma once
 
-// Singleton owning the zenoh session and creating the typed comm objects.
+// One zenoh session: opening and closing it, its namespace prefix, and the
+// typed comm objects created under it. An ordinary object, not a
+// process-wide singleton - whoever opens it owns it.
 //
-// Lifecycle: Init once at process start, Shutdown once at process end.
-// Create*/SetNamespace are thread-safe; the created objects hold their
-// own reference to the session and outlive Shutdown harmlessly (their
-// operations then report kNotConnected).
+// Ownership: hand it around as a std::shared_ptr<ZenohSession>; the last
+// holder's release closes the session, so nothing has to be shut down at
+// process end. Closing is synchronous and waits for a silent endpoint to be
+// given up on - seconds when the address stopped answering, against
+// milliseconds for a local session - so a release belongs where a wait is
+// acceptable (scope exit), never on a zenoh session callback or a watchdog
+// thread. Comm objects created here hold handles of their own on the zenoh
+// session and keep the transport open: Close empties only this object, and
+// what it created keeps working until the last of those handles is gone
+// (their operations then report kNotConnected). Their session-lost
+// notification goes back to the session object that created them, and
+// nowhere once that object is gone.
+//
+// Threading: on an open object, Close/Create*/SetNamespace and the accessors
+// are thread-safe, and calls on different ZenohSession objects are
+// independent. Open is the exception: it must not run concurrently with Open
+// or Close on the same object. Its duplicate check and the assignment of the
+// new session are separated by the multi-second zenoh open and the mutex
+// covers only those two points, so two concurrent calls would both open a
+// session and the second assignment would silently drop the first (both
+// callers see true). Calls that arrive once the session is there are refused
+// as usual. Close is safe from any thread that is not a zenoh session
+// callback; the destructor runs under the same rule.
 
 #include <atomic>
 #include <functional>
@@ -26,20 +47,26 @@
 
 namespace shidou::comm {
 
-class ZenohFactory {
+class ZenohSession : public std::enable_shared_from_this<ZenohSession> {
 public:
-    static ZenohFactory& Instance() {
-        static ZenohFactory instance;
-        return instance;
-    }
+    ZenohSession() = default;
+    ~ZenohSession();
+
+    ZenohSession(const ZenohSession&) = delete;
+    ZenohSession& operator=(const ZenohSession&) = delete;
 
     // Opens the zenoh session from the config. Repeated calls fail with
-    // kAlreadyInitialized (call Shutdown first to re-init).
-    bool Init(const ZenohConfig& cfg);
+    // kAlreadyInitialized (call Close first to re-open); calls arriving after
+    // the session is there are refused, but a call racing this one on the
+    // same object is not (see the class comment).
+    bool Open(const ZenohConfig& cfg);
 
-    // Closes the session. Safe to call from any thread that is not a
-    // zenoh session callback.
-    void Shutdown();
+    // Releases this object's handle on the session, leaving the object
+    // openable again. It does not close the comm objects created from the
+    // session: they hold handles of their own and keep working until the
+    // last of them is gone (see the class comment). Safe to call from any
+    // thread that is not a zenoh session callback.
+    void Close();
 
     // True while a session exists. A lost transport does not clear this:
     // failures surface through Publish/Call errors and the session-lost
@@ -47,7 +74,10 @@ public:
     bool Healthy() const;
 
     // Switches the namespace prefix used by subsequent Create* calls.
-    // Does not affect already-created objects. Thread-safe.
+    // Does not affect already-created objects. Thread-safe. The namespace is
+    // this object's, so everyone running on the session shares it: a switch
+    // moves the prefix that any later Create* call builds under, whichever
+    // holder makes it.
     void SetNamespace(const std::string& ns);
 
     std::string Namespace() const;
@@ -63,7 +93,7 @@ public:
         }
         const auto session = Session();
         if (!session) {
-            SetError(ErrorCode::kNotInitialized, "Init not called");
+            SetError(ErrorCode::kNotInitialized, "session is not open");
             return nullptr;
         }
         try {
@@ -71,9 +101,8 @@ public:
             auto pub = session->declare_publisher(ke, MakePublisherOptions(opts.reliability));
             // Direct new (not make_shared): the constructor is private and
             // friendship does not extend into make_shared's internal helper.
-            return std::shared_ptr<ZenohPublisher<T>>(new ZenohPublisher<T>(
-                session, keyexpr, std::move(pub),
-                []() { ZenohFactory::Instance().NotifySessionLost(); }));
+            return std::shared_ptr<ZenohPublisher<T>>(
+                new ZenohPublisher<T>(session, keyexpr, std::move(pub), MakeLostNotifier()));
         } catch (const zenoh::ZException& e) {
             SetError(ErrorCode::kSessionError, std::string("declare_publisher: ") + e.what());
             return nullptr;
@@ -92,7 +121,7 @@ public:
         }
         const auto session = Session();
         if (!session) {
-            SetError(ErrorCode::kNotInitialized, "Init not called");
+            SetError(ErrorCode::kNotInitialized, "session is not open");
             return nullptr;
         }
         // The object owns the declared subscriber; the callback captures
@@ -128,14 +157,14 @@ public:
         }
         const auto session = Session();
         if (!session) {
-            SetError(ErrorCode::kNotInitialized, "Init not called");
+            SetError(ErrorCode::kNotInitialized, "session is not open");
             return nullptr;
         }
         try {
             zenoh::KeyExpr ke(keyexpr);
-            return std::shared_ptr<ZenohClient<TReq, TRes>>(new ZenohClient<TReq, TRes>(
-                session, keyexpr, std::move(ke), opts.timeout,
-                []() { ZenohFactory::Instance().NotifySessionLost(); }));
+            return std::shared_ptr<ZenohClient<TReq, TRes>>(
+                new ZenohClient<TReq, TRes>(session, keyexpr, std::move(ke), opts.timeout,
+                                            MakeLostNotifier()));
         } catch (const zenoh::ZException& e) {
             SetError(ErrorCode::kSessionError, std::string("keyexpr: ") + e.what());
             return nullptr;
@@ -143,11 +172,11 @@ public:
     }
 
     // Raw session access for tooling (e.g. the wire probe). Null when
-    // not initialized.
+    // not open.
     std::shared_ptr<zenoh::Session> SessionPtr() const;
 
     // Callback invoked once per transport-failure transition (a Publish
-    // or Call that hit a dead session). Cleared on Shutdown.
+    // or Call that hit a dead session). Cleared on Close.
     void SetSessionLostCallback(std::function<void()> cb);
 
     // Reports a transport failure to the session-lost callback (edge
@@ -160,8 +189,6 @@ public:
     std::string LastError() const;
 
 private:
-    ZenohFactory() = default;
-
     // Snapshot of the current session under the lock.
     std::shared_ptr<zenoh::Session> Session() const;
 
@@ -169,12 +196,21 @@ private:
     // sets last_error_ on failure.
     bool BuildKeyexpr(const std::string& name, bool is_service, std::string& out);
 
+    // Builds the session-lost callback handed to the comm objects created
+    // here. It reports to this object while that object is alive and does
+    // nothing afterwards: the comm objects may outlive it.
+    std::function<void()> MakeLostNotifier();
+
     bool SetError(ErrorCode code, std::string message) {
         std::lock_guard<std::mutex> lock(mutex_);
         last_code_ = code;
         last_error_ = std::move(message);
         return false;
     }
+
+    // Releases the session and the state tied to it; true when there was
+    // one. Log-free, so the destructor can use it.
+    bool ReleaseSession();
 
     mutable std::mutex mutex_;
     std::shared_ptr<zenoh::Session> session_;

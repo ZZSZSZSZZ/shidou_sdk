@@ -1,10 +1,10 @@
 name: release
 
 # Tag releases: validate the committed prebuilt tree on all three
-# payloads (Windows x64, Linux x86_64 and aarch64) -- configure, build
-# examples, consumer smoke -- then attach archives of the tagged tree
-# (headers + prebuilt libs + examples; no SDK source) to the GitHub
-# Release of the pushed tag.
+# payloads (Windows x64, Linux x86_64 and aarch64) by calling ci.yml --
+# configure, build examples, consumer smoke -- then attach archives of
+# the tagged tree (headers + prebuilt libs + examples; no SDK source) to
+# the GitHub Release of the pushed tag.
 
 on:
   push:
@@ -15,87 +15,10 @@ permissions:
 
 jobs:
   validate:
-    name: validate (${{ matrix.platform }})
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - { os: windows-latest, platform: windows-x64 }
-          - { os: ubuntu-22.04, platform: ubuntu-x64 }
-          - { os: ubuntu-22.04-arm, platform: ubuntu-arm64 }
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Consumer smoke (Windows)
-        if: matrix.platform == 'windows-x64'
-        shell: pwsh
-        working-directory: ${{ github.workspace }}
-        run: |
-          New-Item -ItemType Directory -Force smoke-check | Out-Null
-          Set-Location smoke-check
-          @'
-          cmake_minimum_required(VERSION 3.18)
-          project(consumer_smoke CXX)
-          file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" SHIDOU_ROOT)
-          set(SHIDOU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-          add_subdirectory("${SHIDOU_ROOT}" shidou)
-          add_executable(consumer_smoke main.cpp)
-          target_link_libraries(consumer_smoke PRIVATE shidou::core)
-          '@ | Set-Content CMakeLists.txt
-          @'
-          #include "shidou/robot/robot.h"
-          int main() {
-              shidou::comm::ZenohConfig cfg;
-              cfg.robot_address = "";   // standalone peer session, no router needed
-              cfg.mode = "peer";
-              cfg.enable_scouting = false;
-              shidou::robot::Robot robot(cfg);
-              return robot.Ready() ? 0 : 1;
-          }
-          '@ | Set-Content main.cpp
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-          $env:PATH = "$env:GITHUB_WORKSPACE\bin\win;$env:PATH"
-          ./build/Release/consumer_smoke.exe
-
-      - name: Consumer smoke (Linux)
-        if: matrix.platform != 'windows-x64'
-        shell: bash
-        working-directory: ${{ github.workspace }}
-        run: |
-          set -e
-          mkdir -p smoke-check && cd smoke-check
-          cat > CMakeLists.txt <<'EOF'
-          cmake_minimum_required(VERSION 3.18)
-          project(consumer_smoke CXX)
-          file(TO_CMAKE_PATH "$ENV{GITHUB_WORKSPACE}" SHIDOU_ROOT)
-          set(SHIDOU_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-          add_subdirectory("${SHIDOU_ROOT}" shidou)
-          add_executable(consumer_smoke main.cpp)
-          target_link_libraries(consumer_smoke PRIVATE shidou::core)
-          EOF
-          cat > main.cpp <<'EOF'
-          #include "shidou/robot/robot.h"
-          int main() {
-              shidou::comm::ZenohConfig cfg;
-              cfg.robot_address = "";   // standalone peer session, no router needed
-              cfg.mode = "peer";
-              cfg.enable_scouting = false;
-              shidou::robot::Robot robot(cfg);
-              return robot.Ready() ? 0 : 1;
-          }
-          EOF
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          cmake --build build --config Release
-          ./build/consumer_smoke
+    # ci.yml's build-and-smoke definition, reused so the tag-time check
+    # cannot drift from the push-time one; the matrix legs, their runner
+    # and the timeout live there.
+    uses: ./.github/workflows/ci.yml
 
   publish:
     name: publish GitHub Release

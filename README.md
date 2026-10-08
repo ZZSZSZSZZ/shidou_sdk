@@ -15,7 +15,7 @@ examples/        # 控制示例（set_fsm / mit_control / pushrod_control / chas
                  # get_state / get_joint）
 ```
 
-## 构建
+## 构建示例
 
 ### Windows（VS2022）
 
@@ -33,7 +33,7 @@ cmake --build build -j$(nproc)
 
 x86_64 与 aarch64 通用：CMake 按 `CMAKE_SYSTEM_PROCESSOR` 自动选取 `lib/linux/`
 或 `lib/linux-arm64/`，命令相同；目标处理器不在支持列表内时配置阶段即报错。在
-x86_64 主机上为 aarch64 交叉构建需自备交叉工具链（分发树内不含工具链文件）。
+x86_64 主机上为 aarch64 交叉构建需自备交叉工具链（本仓不含工具链文件）。
 
 Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁；但手动部署时需手动放
 到 exe 同目录或加入 PATH）。
@@ -41,7 +41,13 @@ Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁
 ## 运行示例
 
 可执行文件在构建目录下（Windows：`build/Release/`；Linux：`build/`）。运行前机器人侧
-zenoh 桥须已在监听，且 namespace 与桥配置一致。
+zenoh 桥须已在监听，且 namespace 与桥配置一致。先用只读的 `get_state` 确认连通：
+
+```bash
+./get_state 192.168.168.168:7447
+```
+
+它只查询状态、不下发任何目标；确认连通后再看下表里的其它示例。
 
 共同约定：
 
@@ -83,19 +89,23 @@ target_link_libraries(your_app PRIVATE shidou::core)
 C++17、第三方依赖与 zenoh 链接项随 `shidou::core` 自动传播。
 
 ```cpp
+#include "shidou/comm/zenoh_session.h"
 #include "shidou/robot/robot.h"
 
 shidou::comm::ZenohConfig cfg;
 cfg.robot_address = "<robot-ip>:7447";
-shidou::robot::Robot robot(cfg);
+auto session = std::make_shared<shidou::comm::ZenohSession>();
+session->Open(cfg);
+shidou::robot::Robot robot(session);   // 会话由调用方持有，最后一个持有者释放时关闭
 // robot.Ready() / Enable() / SetMode() / SendJoint*Target() / SendBodyTarget() /
 // UploadTrajectory() / GetRobotState()
 ```
 
 ## 注意事项
 
-- 预编译库为 Release-only：Windows 使用 VS2022（v143 工具集）构建；Linux
-  两个架构（x86_64 / aarch64）均为 Ubuntu 22.04 构建（GCC 11 / glibc 2.35）
+- 预编译库为 Release-only，由 GitHub Actions 流水线构建：Windows 为 VS2022
+  （v143 工具集）；Linux 两个架构（x86_64 / aarch64）为 Ubuntu 22.04（GCC 11 /
+  glibc 2.35）
 - `lib/linux/` 与 `lib/linux-arm64/` 一架构一目录，跨架构混用会在链接期失败
 - 版本对应 tag；Release 页提供该版本树的 tar.gz / zip 归档
 

@@ -4,38 +4,27 @@
 // 用法：get_state [<ip>:<port>] [namespace]
 // namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
 // namespace 时显式传空串：get_state <ip>:<port> ""
+// 用法与缺省值也可以直接问示例：get_state --help
 
 #include <cstdio>
 #include <string>
 
-#include "shidou/comm/zenoh_factory.h"
+#include "example_common.h"
+#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
-int main(int argc, char** argv) {
-    std::string robot_address = "192.168.168.168:7447";
-    if (argc > 1) {
-        robot_address = argv[1];
-    }
-    std::string ns = "robot168";
-    if (argc > 2) {
-        ns = argv[2];
-    }
-    shidou::comm::ZenohConfig cfg;
-    cfg.robot_address = robot_address;
-    cfg.namespace_ = ns;
-    shidou::InitLogging("info");
+namespace {
 
-    shidou::robot::Robot robot(cfg);
-    if (!robot.Ready()) {
-        std::printf("[FAIL] %s\n", robot.LastError().c_str());
-        return 1;
-    }
-
+// 取一次状态并逐字段打印。
+void QueryState(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
+                example::Verdicts& verdicts) {
     // GetRobotState 返回服务字段与遥测缓存的合并结果；反馈字段来自遥测快照。
+    // 结果值自带本次调用的失败原因，不必再读粘性错误记录。
     shidou::robot::RobotState state;
-    if (!robot.GetRobotState(state)) {
-        std::printf("[FAIL] %s\n", robot.LastError().c_str());
-        return 1;
+    const shidou::robot::Result state_result = robot.GetRobotState(state);
+    if (!state_result) {
+        verdicts.Fail("GetRobotState: %s", state_result.message.c_str());
+        return;
     }
 
     std::printf("fsm_state      : %s\n", state.fsm_state.c_str());
@@ -54,12 +43,18 @@ int main(int argc, char** argv) {
     // 遥测快照：尚未收到样本时 has_feedback 为 false、age 为负。
     if (state.has_feedback) {
         std::printf("feedback       : seq=%llu age=%.1f ms\n",
-                    static_cast<unsigned long long>(state.feedback_seq), state.feedback_age_ms);
+                    static_cast<unsigned long long>(state.feedback_seq),
+                    state.feedback_age_ms);
     } else {
         std::printf("feedback       : none yet\n");
     }
 
-    shidou::comm::ZenohFactory::Instance().Shutdown();
-    std::printf("[PASS] get_state completed\n");
-    return 0;
+    verdicts.Pass("get_state completed");
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // 状态查询没有自己的参数：位置参数只有 [<ip>:<port>] 与 [namespace]。
+    return example::Run(argc, argv, {}, QueryState);
 }

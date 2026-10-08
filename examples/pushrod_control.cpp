@@ -17,24 +17,23 @@
 // target_mm 为目标位置参数（mm，绝对值，填多少就走到哪），缺省 0（零点）。
 // namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
 // namespace 时显式传空串：pushrod_control <target_mm> <ip>:<port> ""
+// 用法与缺省值也可以直接问示例：pushrod_control --help
 
 #include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
-#include <cstdlib>
 #include <string>
 #include <thread>
 
 #include "example_common.h"
-#include "shidou/comm/zenoh_factory.h"
+#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
 namespace {
 
 constexpr std::chrono::milliseconds kFeedbackPeriod{100};  // 到位判据的反馈轮询周期
 constexpr uint32_t kPushrodId = 17;            // 顶杆电机号（示例值，按机器人实际配置修改）
-constexpr double kDefaultTargetPositionMm = 0.0;  // 目标位置参数缺省值（命令行不填时取 0，即零点）
 constexpr double kProfileVelocity = 20.0;      // 轮廓速度 mm/s（示例值）
 constexpr double kProfileAcceleration = 50.0;  // 轮廓加速度 mm/s²（示例值）
 constexpr double kPositionToleranceMm = 1.0;   // 到位判据：位置差不超过该值即算到位
@@ -77,7 +76,8 @@ bool WaitFirstPosition(const shidou::robot::Robot& robot, uint32_t motor_id, dou
 }
 
 // 下发一帧顶杆目标：只填顶杆字段，轮组字段留空（本帧不动轮组）。
-bool SendPushrod(shidou::robot::Robot& robot, double position) {
+// 返回本次下发的结果值，失败时 message 就是这一次的原因。
+shidou::robot::Result SendPushrod(shidou::robot::Robot& robot, double position) {
     shidou::msg::BodyTarget target;
     target.pushrod_id = kPushrodId;
     target.position = position;
@@ -112,53 +112,24 @@ bool WaitInPosition(const shidou::robot::Robot& robot, double from, double goal,
     }
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
-    std::string robot_address = "192.168.168.168:7447";
-    // 目标位置参数（mm，绝对值）；非法参数直接退出，避免把输入错误当成目标下发给电机。
-    double target_mm = kDefaultTargetPositionMm;
-    if (argc > 1) {
-        char* end = nullptr;
-        target_mm = std::strtod(argv[1], &end);
-        if (end == argv[1] || *end != '\0') {
-            std::printf("[FAIL] bad target_mm: %s (expected a number in mm)\n", argv[1]);
-            return 1;
-        }
-    }
-    if (argc > 2) {
-        robot_address = argv[2];
-    }
-    std::string ns = "robot168";
-    if (argc > 3) {
-        ns = argv[3];
-    }
-    shidou::comm::ZenohConfig cfg;
-    cfg.robot_address = robot_address;
-    cfg.namespace_ = ns;
-    shidou::InitLogging("info");
-
-    shidou::robot::Robot robot(cfg);
-    if (!robot.Ready()) {
-        std::printf("[FAIL] %s\n", robot.LastError().c_str());
-        return 1;
-    }
-
+// 单程动作：查询状态 → 必要时 Enable → 读起点 → 等回车 → 下发目标 → 等到位。
+void DrivePushrod(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
+                  example::Verdicts& verdicts, double target_mm) {
     shidou::robot::RobotState state;
-    if (!robot.GetRobotState(state)) {
-        std::printf("[FAIL] GetRobotState: %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result state_result = robot.GetRobotState(state);
+    if (!state_result) {
+        verdicts.Fail("GetRobotState: %s", state_result.message.c_str());
+        return;
     }
     std::printf("fsm_state=%s\n", state.fsm_state.c_str());
 
     // 顶杆在 ENABLED 下即可接收目标位置参数，示例全程保持在使能模式，不下发模式切换；
     // 处于其他状态（POSITION / STOP）时先切回 ENABLED。
     if (state.fsm_state != shidou::robot::kFsmStateEnabled) {
-        if (!robot.Enable()) {
-            std::printf("[FAIL] Enable: %s\n", robot.LastError().c_str());
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        const shidou::robot::Result enabled = robot.Enable();
+        if (!enabled) {
+            verdicts.Fail("Enable: %s", enabled.message.c_str());
+            return;
         }
         std::printf("fsm_state=%s\n", robot.FsmState().c_str());
     }
@@ -167,35 +138,49 @@ int main(int argc, char** argv) {
     double start = 0.0;
     bool saw_sample = false;
     if (!WaitFirstPosition(robot, kPushrodId, start, saw_sample)) {
-        std::printf("[FAIL] no position for pushrod motor %u in %.0f s (%s): "
-                    "nothing was commanded\n",
-                    kPushrodId, kFeedbackWaitSeconds,
-                    saw_sample ? "feedback has no such motor" : "no feedback sample");
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+        verdicts.Fail("no position for pushrod motor %u in %.0f s (%s): "
+                      "nothing was commanded",
+                      kPushrodId, kFeedbackWaitSeconds,
+                      saw_sample ? "feedback has no such motor" : "no feedback sample");
+        return;
     }
     std::printf("plan: pushrod %u %.2f mm -> %.2f mm (profile %.0f mm/s, %.0f mm/s^2)\n",
                 kPushrodId, start, target_mm, kProfileVelocity, kProfileAcceleration);
     std::printf("press Enter to start, Ctrl+C to exit\n");
     if (!example::WaitEnter()) {
         std::printf("aborted, nothing was commanded\n");
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 0;
+        return;
     }
 
     double measured = 0.0;
-    if (!SendPushrod(robot, target_mm)) {
-        std::printf("[FAIL] SendBodyTarget: %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result sent = SendPushrod(robot, target_mm);
+    if (!sent) {
+        verdicts.Fail("SendBodyTarget: %s", sent.message.c_str());
+        return;
     }
     if (!WaitInPosition(robot, start, target_mm, measured)) {
-        std::printf("[FAIL] pushrod did not reach %.2f mm (measured %.2f mm)\n", target_mm, measured);
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+        verdicts.Fail("pushrod did not reach %.2f mm (measured %.2f mm)", target_mm, measured);
+        return;
     }
-    std::printf("[PASS] pushrod %.2f mm -> %.2f mm (measured %.2f mm)\n", start, target_mm, measured);
+    verdicts.Pass("pushrod %.2f mm -> %.2f mm (measured %.2f mm)", start, target_mm, measured);
+}
 
-    shidou::comm::ZenohFactory::Instance().Shutdown();
-    return 0;
+} // namespace
+
+int main(int argc, char** argv) {
+    // 目标位置参数（mm，绝对值）；非法参数走非法调用路径，避免把输入错误当成目标下发给电机。
+    // 缺省值写在参数声明里，与显式取值走同一条解析路径。
+    double target_mm = 0.0;
+    const example::PositionalArg target_arg{
+        "target_mm",
+        "0",
+        "absolute target position in mm; the pushrod moves exactly there",
+        example::ParseDouble("target_mm", "a number in mm", target_mm)};
+
+    return example::Run(argc, argv, {target_arg},
+                        [&target_mm](shidou::robot::Robot& robot,
+                                     const shidou::comm::ZenohConfig& cfg,
+                                     example::Verdicts& verdicts) {
+        DrivePushrod(robot, cfg, verdicts, target_mm);
+    });
 }

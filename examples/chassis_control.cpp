@@ -16,6 +16,7 @@
 // 用法：chassis_control [<ip>:<port>] [namespace]
 // namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
 // namespace 时显式传空串：chassis_control <ip>:<port> ""
+// 用法与缺省值也可以直接问示例：chassis_control --help
 
 #include <array>
 #include <chrono>
@@ -26,7 +27,7 @@
 #include <thread>
 
 #include "example_common.h"
-#include "shidou/comm/zenoh_factory.h"
+#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
 namespace {
@@ -54,7 +55,8 @@ constexpr std::array<Segment, 3> kSegments{{
 }};
 
 // 下发一帧轮速：各轮同速、电流上限取示例值；顶杆字段留空 = 本帧不动顶杆。
-bool SendWheels(shidou::robot::Robot& robot, double speed) {
+// 返回本次下发的结果值，失败时 message 就是这一次的原因。
+shidou::robot::Result SendWheels(shidou::robot::Robot& robot, double speed) {
     shidou::msg::BodyTarget target;
     target.wheel_ids.assign(kWheelIds.begin(), kWheelIds.end());
     target.velocities.assign(kWheelIds.size(), speed);
@@ -62,17 +64,18 @@ bool SendWheels(shidou::robot::Robot& robot, double speed) {
     return robot.SendBodyTarget(target);
 }
 
-// 以固定周期持续下发同一速度，持续 seconds 秒；返回 false 表示下发失败。
-bool PublishLoop(shidou::robot::Robot& robot, double speed, double seconds) {
+// 以固定周期持续下发同一速度，持续 seconds 秒；返回本次循环的结果值（成功时为空值）。
+shidou::robot::Result PublishLoop(shidou::robot::Robot& robot, double speed, double seconds) {
     const auto t0 = std::chrono::steady_clock::now();
     for (;;) {
         const double t =
             std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         if (t >= seconds) {
-            return true;
+            return {};
         }
-        if (!SendWheels(robot, speed)) {
-            return false;
+        const shidou::robot::Result sent = SendWheels(robot, speed);
+        if (!sent) {
+            return sent;
         }
         std::this_thread::sleep_for(kPeriod);
     }
@@ -116,50 +119,31 @@ int PrintWheelFeedback(const shidou::robot::Robot& robot, double expected_vel) {
     return off;
 }
 
-} // namespace
-
-int main(int argc, char** argv) {
-    std::string robot_address = "192.168.168.168:7447";
-    if (argc > 1) {
-        robot_address = argv[1];
-    }
-    std::string ns = "robot168";
-    if (argc > 2) {
-        ns = argv[2];
-    }
-    shidou::comm::ZenohConfig cfg;
-    cfg.robot_address = robot_address;
-    cfg.namespace_ = ns;
-    shidou::InitLogging("info");
-
-    shidou::robot::Robot robot(cfg);
-    if (!robot.Ready()) {
-        std::printf("[FAIL] %s\n", robot.LastError().c_str());
-        return 1;
-    }
-
+// 动作序列：确认计划 → 三段轮速（斜坡 + 保持）→ 死区用例 → 切回 ENABLED。
+void DriveChassis(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
+                  example::Verdicts& verdicts) {
     shidou::robot::RobotState state;
-    if (!robot.GetRobotState(state)) {
-        std::printf("[FAIL] GetRobotState: %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result state_result = robot.GetRobotState(state);
+    if (!state_result) {
+        verdicts.Fail("GetRobotState: %s", state_result.message.c_str());
+        return;
     }
     std::printf("fsm_state=%s\n", state.fsm_state.c_str());
 
     // 模式命令只能从 ENABLED 发起（STOP 态只接受 enabled，不能直接切模式）。
     if (state.fsm_state != shidou::robot::kFsmStateEnabled) {
-        if (!robot.Enable()) {
-            std::printf("[FAIL] Enable: %s\n", robot.LastError().c_str());
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        const shidou::robot::Result enabled = robot.Enable();
+        if (!enabled) {
+            verdicts.Fail("Enable: %s", enabled.message.c_str());
+            return;
         }
         std::printf("fsm_state=%s\n", robot.FsmState().c_str());
     }
     // 轮组只在 POSITION 态生效：切模式并确认后再发轮速。
-    if (!robot.SetMode(shidou::robot::ControlMode::kPosition)) {
-        std::printf("[FAIL] SetMode(POSITION): %s\n", robot.LastError().c_str());
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 1;
+    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kPosition);
+    if (!mode) {
+        verdicts.Fail("SetMode(POSITION): %s", mode.message.c_str());
+        return;
     }
     std::printf("fsm_state=%s\n", robot.FsmState().c_str());
 
@@ -175,8 +159,7 @@ int main(int argc, char** argv) {
     std::printf("press Enter to start, Ctrl+C to exit\n");
     if (!example::WaitEnter()) {
         std::printf("aborted, nothing was commanded\n");
-        shidou::comm::ZenohFactory::Instance().Shutdown();
-        return 0;
+        return;
     }
 
     bool wheels_ok = true;  // 任一段或死区用例的轮速判定失败即置 false
@@ -192,17 +175,18 @@ int main(int argc, char** argv) {
             if (t >= kRampSeconds) {
                 break;
             }
-            if (!SendWheels(robot, previous + (seg.speed - previous) * (t / kRampSeconds))) {
-                std::printf("[FAIL] SendBodyTarget: %s\n", robot.LastError().c_str());
-                shidou::comm::ZenohFactory::Instance().Shutdown();
-                return 1;
+            const shidou::robot::Result sent =
+                SendWheels(robot, previous + (seg.speed - previous) * (t / kRampSeconds));
+            if (!sent) {
+                verdicts.Fail("SendBodyTarget: %s", sent.message.c_str());
+                return;
             }
             std::this_thread::sleep_for(kPeriod);
         }
-        if (!PublishLoop(robot, seg.speed, seg.hold)) {
-            std::printf("[FAIL] SendBodyTarget: %s\n", robot.LastError().c_str());
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        const shidou::robot::Result held = PublishLoop(robot, seg.speed, seg.hold);
+        if (!held) {
+            verdicts.Fail("SendBodyTarget: %s", held.message.c_str());
+            return;
         }
         if (PrintWheelFeedback(robot, seg.speed) > 0) {
             wheels_ok = false;
@@ -218,24 +202,29 @@ int main(int argc, char** argv) {
     const int deadman_off = PrintWheelFeedback(robot, 0.0);
     if (deadman_off > 0) {
         wheels_ok = false;
-        if (!PublishLoop(robot, 0.0, kStopSeconds)) {
-            std::printf("[FAIL] SendBodyTarget: %s\n", robot.LastError().c_str());
-            shidou::comm::ZenohFactory::Instance().Shutdown();
-            return 1;
+        const shidou::robot::Result zeroed = PublishLoop(robot, 0.0, kStopSeconds);
+        if (!zeroed) {
+            verdicts.Fail("SendBodyTarget: %s", zeroed.message.c_str());
+            return;
         }
     }
 
     // 切回 ENABLED，机器人回到可再次接收模式命令的状态。
-    const bool ok = robot.Enable();
-    shidou::comm::ZenohFactory::Instance().Shutdown();
-    if (!ok) {
-        std::printf("[FAIL] Enable: %s\n", robot.LastError().c_str());
-        return 1;
+    const shidou::robot::Result enabled = robot.Enable();
+    if (!enabled) {
+        verdicts.Fail("Enable: %s", enabled.message.c_str());
+        return;
     }
-    std::printf("[PASS] Enable -> fsm_state=%s\n", robot.FsmState().c_str());
+    verdicts.Pass("Enable -> fsm_state=%s", robot.FsmState().c_str());
     if (!wheels_ok) {
-        std::printf("[FAIL] wheel velocities off target (see above)\n");
-        return 1;
+        verdicts.Fail("wheel velocities off target (see above)");
+        return;
     }
-    return 0;
+}
+
+} // namespace
+
+int main(int argc, char** argv) {
+    // 底盘控制没有自己的参数：位置参数只有 [<ip>:<port>] 与 [namespace]。
+    return example::Run(argc, argv, {}, DriveChassis);
 }
