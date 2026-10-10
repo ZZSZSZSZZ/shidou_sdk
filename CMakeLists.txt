@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.18)
 # The version placeholder is substituted by ci/build_dist.py when the
 # tree is assembled from the source repository; this file is not meant
 # to be configured directly from payload/shidou_sdk/.
-project(shidou_sdk VERSION 2.0.0 LANGUAGES CXX)
+project(shidou_sdk VERSION 2.1.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,9 +23,10 @@ string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" SHIDOU_PROC)
 
 if(WIN32)
     if(SHIDOU_PROC STREQUAL "arm64" OR SHIDOU_PROC STREQUAL "aarch64")
-        message(FATAL_ERROR "No prebuilt shidou_core for Windows on ARM64.")
+        set(SHIDOU_PLATFORM win-arm64)
+    else()
+        set(SHIDOU_PLATFORM win)
     endif()
-    set(SHIDOU_PLATFORM win)
 elseif(UNIX AND NOT APPLE)
     if(SHIDOU_PROC STREQUAL "x86_64" OR SHIDOU_PROC STREQUAL "amd64")
         set(SHIDOU_PLATFORM linux)

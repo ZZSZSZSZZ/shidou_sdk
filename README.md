@@ -8,6 +8,7 @@
 CMakeLists.txt   # 构建示例（可用 SHIDOU_BUILD_EXAMPLES=OFF 关闭）
 include/         # shidou_core 头文件 + spdlog / zenoh-cpp / zenoh-c 头文件
 lib/win/         # Windows（VS2022 x64 Release）：shidou_core.lib + zenoh-c 库与 cmake 配置
+lib/win-arm64/   # Windows（VS2026 ARM64 Release）：同上，arm64 版本
 lib/linux/       # Linux（Ubuntu 22.04 x86_64 Release）：libshidou_core.a + zenoh-c 库与 cmake 配置
 lib/linux-arm64/ # Linux（Ubuntu 22.04 aarch64 Release）：同上，aarch64 版本
 bin/win/         # zenohc.dll
