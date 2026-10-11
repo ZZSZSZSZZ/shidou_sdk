@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.18)
 # The version placeholder is substituted by ci/build_dist.py when the
 # tree is assembled from the source repository; this file is not meant
 # to be configured directly from payload/shidou_sdk/.
-project(shidou_sdk VERSION 2.1.0 LANGUAGES CXX)
+project(shidou_sdk VERSION 2.2.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -40,12 +40,16 @@ else()
     message(FATAL_ERROR "No prebuilt shidou_core for this platform.")
 endif()
 set(SHIDOU_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib/${SHIDOU_PLATFORM}")
+# The Windows payload keeps its runtime binary in a directory of its own,
+# per platform; the deploy function below copies it beside executables.
+set(SHIDOU_ZENOHC_DLL "${CMAKE_CURRENT_SOURCE_DIR}/bin/${SHIDOU_PLATFORM}/zenohc.dll")
 
 # zenoh-c: vendored prebuilt release. The target is recreated here
 # (instead of find_package) because the official package config
 # resolves paths relative to its own location, which does not survive
-# the per-platform lib/{win,linux,linux-arm64} nesting of this
-# repository. The properties mirror the official config's shared target.
+# the per-platform lib/{win,win-arm64,linux,linux-arm64} nesting of
+# this repository. The properties mirror the official config's shared
+# target.
 if(NOT TARGET zenohc::lib)
     add_library(zenohc::lib SHARED IMPORTED GLOBAL)
     set_target_properties(zenohc::lib PROPERTIES
@@ -53,7 +57,7 @@ if(NOT TARGET zenohc::lib)
         INTERFACE_INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/include")
     if(WIN32)
         set_target_properties(zenohc::lib PROPERTIES
-            IMPORTED_LOCATION "${CMAKE_CURRENT_SOURCE_DIR}/bin/win/zenohc.dll"
+            IMPORTED_LOCATION "${SHIDOU_ZENOHC_DLL}"
             IMPORTED_IMPLIB "${SHIDOU_LIB_DIR}/zenohc.dll.lib")
     else()
         # Both Linux platforms share this branch: the architecture is
@@ -93,6 +97,12 @@ endif()
 if(NOT EXISTS "${SHIDOU_CORE_LIB}")
     message(FATAL_ERROR "Prebuilt shidou_core missing: ${SHIDOU_CORE_LIB}")
 endif()
+# The Windows runtime binary lives in a directory of its own: a tree that
+# carries lib/<platform>/ but no bin/<platform>/ fails here, while the
+# path is still in hand, instead of at the first deploy step.
+if(WIN32 AND NOT EXISTS "${SHIDOU_ZENOHC_DLL}")
+    message(FATAL_ERROR "Prebuilt zenohc runtime missing: ${SHIDOU_ZENOHC_DLL}")
+endif()
 add_library(shidou::core STATIC IMPORTED GLOBAL)
 set_target_properties(shidou::core PROPERTIES
     IMPORTED_LOCATION "${SHIDOU_CORE_LIB}"
@@ -105,7 +115,7 @@ function(shidou_deploy_zenohc_runtime target)
     if(WIN32)
         add_custom_command(TARGET ${target} POST_BUILD
             COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/bin/win/zenohc.dll"
+                "${SHIDOU_ZENOHC_DLL}"
                 $<TARGET_FILE_DIR:${target}>)
     endif()
 endfunction()

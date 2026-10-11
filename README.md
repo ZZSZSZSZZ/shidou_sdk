@@ -11,19 +11,32 @@ lib/win/         # Windows（VS2022 x64 Release）：shidou_core.lib + zenoh-c �
 lib/win-arm64/   # Windows（VS2026 ARM64 Release）：同上，arm64 版本
 lib/linux/       # Linux（Ubuntu 22.04 x86_64 Release）：libshidou_core.a + zenoh-c 库与 cmake 配置
 lib/linux-arm64/ # Linux（Ubuntu 22.04 aarch64 Release）：同上，aarch64 版本
-bin/win/         # zenohc.dll
+bin/win/         # zenohc.dll（x64）
+bin/win-arm64/   # zenohc.dll（arm64）
 examples/        # 控制示例（set_fsm / mit_control / pushrod_control / chassis_control /
                  # get_state / get_joint）
 ```
 
 ## 构建示例
 
-### Windows（VS2022）
+### Windows x64（VS2022）
 
 ```bat
 cmake -S . -B build
 cmake --build build --config Release
 ```
+
+### Windows ARM64（VS2026）
+
+```bat
+:: 先进入 ARM64 本机工具命令提示符，或先执行
+:: "<VS 安装目录>\VC\Auxiliary\Build\vcvarsall.bat" arm64
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+ARM64 载荷由 VS2026 工具集构建；该基线下 CMake 没有 Visual Studio 2026 生成器，
+因此用 Ninja 单配置构建。
 
 ### Linux（Ubuntu 22.04）
 
@@ -32,8 +45,10 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j$(nproc)
 ```
 
-x86_64 与 aarch64 通用：CMake 按 `CMAKE_SYSTEM_PROCESSOR` 自动选取 `lib/linux/`
-或 `lib/linux-arm64/`，命令相同；目标处理器不在支持列表内时配置阶段即报错。在
+平台选择：CMake 按 `CMAKE_SYSTEM_PROCESSOR` 自动选取本平台的 `lib/<平台>/` 与
+`bin/<平台>/`（Windows x64 → `lib/win/`、`bin/win/`；Windows ARM64 →
+`lib/win-arm64/`、`bin/win-arm64/`；Linux x86_64 / aarch64 → `lib/linux/` 或
+`lib/linux-arm64/`），命令行相同；目标处理器不在支持列表内时配置阶段即报错。在
 x86_64 主机上为 aarch64 交叉构建需自备交叉工具链（本仓不含工具链文件）。
 
 Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁；但手动部署时需手动放
@@ -41,8 +56,9 @@ Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁
 
 ## 运行示例
 
-可执行文件在构建目录下（Windows：`build/Release/`；Linux：`build/`）。运行前机器人侧
-zenoh 桥须已在监听，且 namespace 与桥配置一致。先用只读的 `get_state` 确认连通：
+可执行文件在构建目录下（Windows x64：`build/Release/`；Windows ARM64 与 Linux：
+`build/`）。运行前机器人侧 zenoh 桥须已在监听，且 namespace 与桥配置一致。先用只读的
+`get_state` 确认连通：
 
 ```bash
 ./get_state 192.168.168.168:7447
@@ -104,10 +120,13 @@ shidou::robot::Robot robot(session);   // 会话由调用方持有，最后一�
 
 ## 注意事项
 
-- 预编译库为 Release-only，由 GitHub Actions 流水线构建：Windows 为 VS2022
-  （v143 工具集）；Linux 两个架构（x86_64 / aarch64）为 Ubuntu 22.04（GCC 11 /
-  glibc 2.35）
-- `lib/linux/` 与 `lib/linux-arm64/` 一架构一目录，跨架构混用会在链接期失败
+- 预编译库为 Release-only，由 GitHub Actions 流水线构建，Windows 两个基线与 Linux
+  分列：Windows x64 为 VS2022（v143 工具集）；Windows ARM64 为 VS2026（MSVC 14.51
+  工具集——该 arm64 镜像不提供 VS2022，无法与 x64 侧对齐）；Linux 两个架构
+  （x86_64 / aarch64）为 Ubuntu 22.04（GCC 11 / glibc 2.35）
+- 一架构一目录：Windows x64 用 `lib/win/` 与 `bin/win/`，Windows ARM64 用
+  `lib/win-arm64/` 与 `bin/win-arm64/`，Linux 两个架构用 `lib/linux/` 与
+  `lib/linux-arm64/`，跨架构混用会在链接期失败
 - 版本对应 tag；Release 页提供该版本树的 tar.gz / zip 归档
 
 ## 许可

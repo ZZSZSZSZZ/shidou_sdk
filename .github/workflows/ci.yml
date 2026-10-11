@@ -1,11 +1,14 @@
 name: ci
 
-# Validates the committed prebuilt tree on all three payloads (Windows
-# x64, Linux x86_64 and aarch64): configure (no network needed,
+# Validates the committed prebuilt tree on all four payloads (Windows x64
+# and ARM64, Linux x86_64 and aarch64): configure (no network needed,
 # everything is vendored), build the examples, then build and run a
 # throwaway consumer project against the tree to prove the prebuilt
-# library links and runs. release.yml reuses this definition on tags
-# (workflow_call), so the push-time and tag-time checks cannot drift.
+# library links and runs. The windows-11-arm leg builds with Ninja inside
+# the vcvars arm64 developer environment, because that image carries
+# Visual Studio 2026 and its CMake has no generator for it. release.yml
+# reuses this definition on tags (workflow_call), so the push-time and
+# tag-time checks cannot drift.
 
 on:
   push:
@@ -24,22 +27,67 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: windows-latest, platform: windows-x64 }
+          - { os: windows-latest, platform: windows-x64, slug: win }
+          - { os: windows-11-arm, platform: windows-arm64, slug: win-arm64, generator: "-G Ninja" }
           - { os: ubuntu-22.04, platform: ubuntu-x64 }
           - { os: ubuntu-22.04-arm, platform: ubuntu-arm64 }
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
+      # Mirrors the Windows ARM64 setup in the source repository's publish.yml;
+      # the copy ships with the payload repository and cannot share its scripts.
+      #
+      # That leg's matrix row passes -G Ninja: without a Visual Studio
+      # generator it builds in the vcvars arm64 developer environment, whose
+      # variables (compiler search path, INCLUDE, LIB, ...) are imported into
+      # the following steps through GITHUB_ENV. Only NAME=VALUE lines are
+      # taken, so the variables the runner owns (per-step paths, run
+      # metadata) are left to it.
+      #
+      # The batch file carries cmd its own quoting: a quoted vcvars path
+      # handed to cmd.exe as a bash argument does not survive the Git Bash
+      # argument conversion.
+      - name: Set up the ARM64 developer environment
+        if: matrix.os == 'windows-11-arm'
+        shell: bash
+        run: |
+          vswhere="C:/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe"
+          vs_path=""
+          if [ -f "$vswhere" ]; then
+            vs_path=$("$vswhere" -latest -property installationPath | tr -d '\r')
+          fi
+          if [ -z "$vs_path" ]; then
+            vs_path="C:/Program Files/Microsoft Visual Studio/18/Enterprise"
+          fi
+          vcvars="$vs_path/VC/Auxiliary/Build/vcvarsall.bat"
+          if [ ! -f "$vcvars" ]; then
+            echo "vcvarsall.bat not found under: $vs_path"
+            exit 1
+          fi
+          dump="$RUNNER_TEMP/vcvars-arm64-env.txt"
+          wrapper="$RUNNER_TEMP/vcvars-arm64-env.bat"
+          printf '@echo off\r\ncall "%s" arm64 >nul\r\nset\r\n' \
+            "$(cygpath -w "$vcvars")" > "$wrapper"
+          "$wrapper" > "$dump"
+          if ! grep -q '^INCLUDE=' "$dump" || ! grep -q '^LIB=' "$dump"; then
+            echo "the vcvars arm64 environment did not set INCLUDE/LIB"
+            exit 1
+          fi
+          grep -E '^[A-Za-z_][A-Za-z0-9_]*=' "$dump" \
+            | grep -Ev '^(GITHUB_|RUNNER_|ACTIONS_|INPUT_|AGENT_|CI=)' >> "$GITHUB_ENV"
+          echo "developer environment: $vs_path (arm64)"
+          echo "toolset $(grep -E '^VCToolsVersion=' "$dump" | cut -d= -f2- | tr -d '\r') (engine $(grep -E '^VSCMD_VER=' "$dump" | cut -d= -f2- | tr -d '\r'))"
+
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.generator }}
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
       - name: Consumer smoke (Windows)
-        if: matrix.platform == 'windows-x64'
+        if: startsWith(matrix.platform, 'windows')
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
@@ -76,13 +124,18 @@ jobs:
               return second.Ready() ? 0 : 1;
           }
           '@ | Set-Content main.cpp
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release ${{ matrix.generator }}
           cmake --build build --config Release
-          $env:PATH = "$env:GITHUB_WORKSPACE\bin\win;$env:PATH"
-          ./build/Release/consumer_smoke.exe
+          $env:PATH = "$env:GITHUB_WORKSPACE\bin\${{ matrix.slug }};$env:PATH"
+          if ("${{ matrix.generator }}" -match 'Ninja') {
+            # A Ninja build is single-config: no per-configuration subdirectory.
+            ./build/consumer_smoke.exe
+          } else {
+            ./build/Release/consumer_smoke.exe
+          }
 
       - name: Consumer smoke (Linux)
-        if: matrix.platform != 'windows-x64'
+        if: ${{ !startsWith(matrix.platform, 'windows') }}
         shell: bash
         working-directory: ${{ github.workspace }}
         run: |
