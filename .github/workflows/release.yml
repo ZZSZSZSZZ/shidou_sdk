@@ -32,11 +32,22 @@ jobs:
           git archive --format=tar.gz -o shidou_sdk-$GITHUB_REF_NAME.tar.gz HEAD
           git archive --format=zip -o shidou_sdk-$GITHUB_REF_NAME.zip HEAD
 
-      - name: Create release with tree archives
+      # A re-pushed tag (the fix path for a bad tree) reaches this step with
+      # the release already present, and create would then fail on it;
+      # refreshing the archives in place keeps the release equal to the tag.
+      - name: Create or refresh the release with tree archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "$GITHUB_REF_NAME" \
-            shidou_sdk-$GITHUB_REF_NAME.tar.gz \
-            shidou_sdk-$GITHUB_REF_NAME.zip \
-            --generate-notes --repo "$GITHUB_REPOSITORY"
+          set -eu
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" \
+              "shidou_sdk-$GITHUB_REF_NAME.tar.gz" \
+              "shidou_sdk-$GITHUB_REF_NAME.zip" \
+              --clobber --repo "$GITHUB_REPOSITORY"
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              "shidou_sdk-$GITHUB_REF_NAME.tar.gz" \
+              "shidou_sdk-$GITHUB_REF_NAME.zip" \
+              --generate-notes --repo "$GITHUB_REPOSITORY"
+          fi
