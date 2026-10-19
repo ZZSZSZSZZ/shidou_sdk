@@ -119,6 +119,11 @@ bool WriteSeqStruct(WriteBuffer& out, const std::vector<T>& v) {
     return true;
 }
 
+// Every string field starts with a 4-byte length prefix, so a decoder that
+// has to decide whether a field declared later is present at all can rule it
+// out by what is left: fewer bytes than the prefix cannot hold one.
+constexpr size_t kStringLengthPrefixBytes = 4;
+
 // String: uint32 byte length counting the trailing NUL, then the bytes.
 // The length check rejects payloads that cannot hold the claimed bytes.
 inline bool ReadString(ReadCursor& in, std::string& out) {

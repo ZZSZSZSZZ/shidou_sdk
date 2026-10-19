@@ -30,6 +30,10 @@ void QueryState(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
     std::printf("fsm_state      : %s\n", state.fsm_state.c_str());
     std::printf("arm_info       : %s\n", state.arm_info.c_str());
     std::printf("gripper_info   : %s\n", state.gripper_info.c_str());
+    // 型号名：手写配置通道下为空串。
+    std::printf("model          : %s\n", state.model.c_str());
+    // 机身构型：none / wheels / pushrod / wheels_pushrod 的组合。
+    std::printf("body_info      : %s\n", state.body_info.c_str());
     std::printf("library_status : 0x%04x\n", state.library_status);
     std::printf("control_freq_hz: %.1f\n", state.control_freq_hz);
     std::printf("cycle avg/max  : %.2f / %.2f ms\n", state.control_cycle_avg_ms,

@@ -171,16 +171,36 @@ inline bool GetStateResponse::Encode(codec::WriteBuffer& out) const {
     // The three doubles are contiguous once the first is 8-aligned.
     out.WriteF64(control_cycle_avg_ms);
     out.WriteF64(control_cycle_max_ms);
-    return codec::WriteU32Aligned(out, cycle_overruns);
+    return codec::WriteU32Aligned(out, cycle_overruns) && codec::WriteString(out, model) &&
+           codec::WriteString(out, body_info);
 }
 
 inline bool GetStateResponse::Decode(codec::ReadCursor& in) {
-    return codec::ReadString(in, fsm_state) && codec::ReadString(in, arm_info) &&
-           codec::ReadString(in, gripper_info) && codec::ReadSeq(in, motor_ids) &&
-           codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
-           codec::ReadSeq(in, torques) && codec::ReadU32Aligned(in, library_status) &&
-           codec::ReadF64Aligned(in, control_freq_hz) && in.ReadF64(control_cycle_avg_ms) &&
-           in.ReadF64(control_cycle_max_ms) && codec::ReadU32Aligned(in, cycle_overruns);
+    if (!(codec::ReadString(in, fsm_state) && codec::ReadString(in, arm_info) &&
+          codec::ReadString(in, gripper_info) && codec::ReadSeq(in, motor_ids) &&
+          codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
+          codec::ReadSeq(in, torques) && codec::ReadU32Aligned(in, library_status) &&
+          codec::ReadF64Aligned(in, control_freq_hz) && in.ReadF64(control_cycle_avg_ms) &&
+          in.ReadF64(control_cycle_max_ms) && codec::ReadU32Aligned(in, cycle_overruns))) {
+        return false;
+    }
+    // Additive tail: model and body_info were appended to the reply in that
+    // order, so a robot may end the body at the last statistic (predating
+    // both), carry model only, or carry both. Padding the body to a 4-byte
+    // boundary adds at most 3 zero bytes and a string field always starts
+    // with a 4-byte length prefix, so fewer bytes left than that is padding,
+    // not a field, and ends the tail. Whatever is left unread after this is
+    // still subject to the frame's own trailing-byte rule (at most 3 zero
+    // bytes).
+    if (in.Remaining() >= codec::kStringLengthPrefixBytes &&
+        !codec::ReadString(in, model)) {
+        return false;
+    }
+    if (in.Remaining() >= codec::kStringLengthPrefixBytes &&
+        !codec::ReadString(in, body_info)) {
+        return false;
+    }
+    return true;
 }
 
 inline bool JointTrajectoryRequest::Encode(codec::WriteBuffer& out) const {

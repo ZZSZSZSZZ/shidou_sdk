@@ -40,7 +40,7 @@ struct ArmLayout {
     int right_dof = 0;  // 右臂自由度（末端电机号 = right_dof + 7）
 };
 
-// 解析 arm_info（"型号_布局_自由度"，布局段为 left / right / dual；
+// 解析 arm_info（"{构型}_{自由度}"，构型段为 left / right / dual；
 // 自由度段为 "5" / "7" 或双臂不同的 "5x7"（左x右））。
 bool ParseArmLayout(const std::string& arm_info, ArmLayout& out) {
     std::vector<std::string> segs;
@@ -79,7 +79,7 @@ bool ParseArmLayout(const std::string& arm_info, ArmLayout& out) {
 
     for (size_t i = 0; i + 1 < segs.size(); ++i) {
         if (segs[i] != "left" && segs[i] != "right" && segs[i] != "dual") {
-            continue;  // 非布局段（如型号段）跳过，不解析其后的段
+            continue;  // 非构型段跳过，不解析其后的段
         }
         int l = 0;
         int r = 0;

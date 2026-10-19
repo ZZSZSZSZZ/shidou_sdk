@@ -24,7 +24,9 @@ struct GetStateRequest {
 
 struct GetStateResponse {
     std::string fsm_state;   // STOP / ENABLED / CSP / POSITION / TRAJECTORY
-    // "{model}_{layout}_{dof}", e.g. arm_dual_7; "none" when no arm.
+    // "{layout}_{dof}", e.g. dual_7; "dual_{left}x{right}" when the sides
+    // differ (dual_7x5); "none" when no arm. Carries neither model nor
+    // motor family: the model is its own field below.
     std::string arm_info;
     // right / left / dual / none
     std::string gripper_info;
@@ -40,6 +42,15 @@ struct GetStateResponse {
     double control_cycle_max_ms = 0.0;
     uint32_t cycle_overruns = 0;     // cycles exceeding dt * 1.5
 
+    // Model name (e.g. arm_s1 / robot_d1); empty when the robot boots from a
+    // hand-written config rather than a model. Additive tail: a robot that
+    // predates this field ends the body before it and decodes as empty.
+    std::string model;
+    // Body classes the robot drives: none / wheels / pushrod /
+    // wheels_pushrod. Derived from the actual configuration, so both startup
+    // channels report it. Additive tail like model.
+    std::string body_info;
+
     static constexpr size_t kCdrAlignment = 8;
 
     bool Encode(codec::WriteBuffer& out) const;
@@ -53,7 +64,8 @@ struct GetStateResponse {
                control_freq_hz == other.control_freq_hz &&
                control_cycle_avg_ms == other.control_cycle_avg_ms &&
                control_cycle_max_ms == other.control_cycle_max_ms &&
-               cycle_overruns == other.cycle_overruns;
+               cycle_overruns == other.cycle_overruns && model == other.model &&
+               body_info == other.body_info;
     }
 };
 
