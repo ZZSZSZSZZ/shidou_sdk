@@ -1,9 +1,8 @@
 #pragma once
 
-// std_msgs/msg/String equivalent. Used by fsm_state (published) and
-// fsm_command (subscribed): payload is lowercase "enabled" / "csp" /
-// "position" / "trajectory" / "stop", and fsm_state carries the uppercase
-// FSM state name.
+// std_msgs/msg/String equivalent. Used by fsm_state, whose payload is the
+// uppercase FSM state name (ENABLED / MIT / CSP / PP / STOP). Commands no
+// longer travel as strings: they go through the run_command service.
 
 #include <string>
 

@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.18)
 # The version placeholder is substituted by ci/build_dist.py when the
 # tree is assembled from the source repository; this file is not meant
 # to be configured directly from payload/shidou_sdk/.
-project(shidou_sdk VERSION 2.2.1 LANGUAGES CXX)
+project(shidou_sdk VERSION 2.3.0 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -125,7 +125,7 @@ endfunction()
 # ci/build_dist.py (from its EXAMPLE_TARGETS); the template names no example
 # of its own.
 if(SHIDOU_BUILD_EXAMPLES)
-    foreach(name IN ITEMS chassis_control get_joint get_state mit_control pushrod_control set_fsm)
+    foreach(name IN ITEMS chassis_control get_joint get_state mit_control pp_control pushrod_control set_fsm)
         add_executable(${name} examples/${name}.cpp)
         target_link_libraries(${name} PRIVATE shidou::core)
         shidou_deploy_zenohc_runtime(${name})

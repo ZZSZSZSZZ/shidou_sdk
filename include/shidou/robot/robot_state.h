@@ -31,6 +31,12 @@ struct RobotState {
     // Body classes the robot drives (none / wheels / pushrod /
     // wheels_pushrod); empty against a robot that predates the field.
     std::string body_info;
+    // Mode the robot drives each motor with (mit / csp / pp), index-aligned
+    // with motor_ids, and how far device readback confirms it
+    // (confirmed / requested / unknown). Both empty against a robot that
+    // predates the fields. Only confirmed means the device accepted the mode.
+    std::vector<std::string> control_mode;
+    std::vector<std::string> control_mode_confidence;
 
     // joint_states telemetry at call time; false fields when no sample
     // has arrived yet.

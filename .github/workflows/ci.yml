@@ -111,16 +111,16 @@ jobs:
               cfg.robot_address = "";   // standalone peer session, no router needed
               cfg.mode = "peer";
               cfg.enable_scouting = false;
-              auto session = std::make_shared<shidou::comm::ZenohSession>();
-              if (!session->Open(cfg)) return 2;
-              shidou::robot::Robot robot(session);   // the caller owns the session
+
+              // The documented entry point: the handle opens its own session.
+              shidou::robot::Robot robot(cfg);
               if (!robot.Ready()) return 1;
 
-              // A second session of its own: sessions are per owner, they
-              // coexist in one process.
-              auto second_session = std::make_shared<shidou::comm::ZenohSession>();
-              if (!second_session->Open(cfg)) return 3;
-              shidou::robot::Robot second(second_session);
+              // And a handle can still borrow a session its caller opened:
+              // sessions are per owner, they coexist in one process.
+              auto session = std::make_shared<shidou::comm::ZenohSession>();
+              if (!session->Open(cfg)) return 2;
+              shidou::robot::Robot second(session);
               return second.Ready() ? 0 : 1;
           }
           '@ | Set-Content main.cpp
@@ -159,16 +159,16 @@ jobs:
               cfg.robot_address = "";   // standalone peer session, no router needed
               cfg.mode = "peer";
               cfg.enable_scouting = false;
-              auto session = std::make_shared<shidou::comm::ZenohSession>();
-              if (!session->Open(cfg)) return 2;
-              shidou::robot::Robot robot(session);   // the caller owns the session
+
+              // The documented entry point: the handle opens its own session.
+              shidou::robot::Robot robot(cfg);
               if (!robot.Ready()) return 1;
 
-              // A second session of its own: sessions are per owner, they
-              // coexist in one process.
-              auto second_session = std::make_shared<shidou::comm::ZenohSession>();
-              if (!second_session->Open(cfg)) return 3;
-              shidou::robot::Robot second(second_session);
+              // And a handle can still borrow a session its caller opened:
+              // sessions are per owner, they coexist in one process.
+              auto session = std::make_shared<shidou::comm::ZenohSession>();
+              if (!session->Open(cfg)) return 2;
+              shidou::robot::Robot second(session);
               return second.Ready() ? 0 : 1;
           }
           EOF

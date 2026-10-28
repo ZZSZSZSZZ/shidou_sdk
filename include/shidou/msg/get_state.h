@@ -23,7 +23,7 @@ struct GetStateRequest {
 };
 
 struct GetStateResponse {
-    std::string fsm_state;   // STOP / ENABLED / CSP / POSITION / TRAJECTORY
+    std::string fsm_state;   // STOP / ENABLED / MIT / CSP / PP
     // "{layout}_{dof}", e.g. dual_7; "dual_{left}x{right}" when the sides
     // differ (dual_7x5); "none" when no arm. Carries neither model nor
     // motor family: the model is its own field below.
@@ -51,6 +51,19 @@ struct GetStateResponse {
     // channels report it. Additive tail like model.
     std::string body_info;
 
+    // Mode the robot is driving each motor with: mit / csp / pp, the same
+    // tokens set_mode takes. Index-aligned with motor_ids. Additive tail.
+    std::vector<std::string> control_mode;
+    // How well control_mode is confirmed by device readback, index-aligned
+    // with motor_ids:
+    //   confirmed = the device reads back as control_mode
+    //   requested = the mode was commanded but not yet read back
+    //   unknown   = cannot confirm: the driver has no mode readback (EYOU,
+    //               IWS, pushrod), or the readback disagrees with the drive
+    //               mode. Only confirmed means the device accepted the mode;
+    //               otherwise it may still be running the previous one.
+    std::vector<std::string> control_mode_confidence;
+
     static constexpr size_t kCdrAlignment = 8;
 
     bool Encode(codec::WriteBuffer& out) const;
@@ -65,7 +78,8 @@ struct GetStateResponse {
                control_cycle_avg_ms == other.control_cycle_avg_ms &&
                control_cycle_max_ms == other.control_cycle_max_ms &&
                cycle_overruns == other.cycle_overruns && model == other.model &&
-               body_info == other.body_info;
+               body_info == other.body_info && control_mode == other.control_mode &&
+               control_mode_confidence == other.control_mode_confidence;
     }
 };
 

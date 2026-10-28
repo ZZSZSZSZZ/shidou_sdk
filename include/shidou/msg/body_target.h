@@ -7,13 +7,13 @@
 // max_currents may be shorter or empty (the robot applies the device
 // default). pushrod_id = 0 means "no pushrod target in this frame".
 //
-// Robot-side gating (robot_movement body component): the wheels move in
-// POSITION only and are forced to zero in every other state, and they fall
-// back to zero velocity when no message arrives for 500 ms (dead man, timed
-// on message arrival); the pushrod works in ENABLED + POSITION and holds its
-// position once there. Body feedback is NOT a separate topic: it arrives in
-// joint_states with mixed units distinguished by motor_id (pushrod mm,
-// wheels rad and rad/s).
+// Robot-side gating (body component): the wheels move in the
+// three mode states only (MIT / CSP / PP) and are forced to zero in ENABLED
+// and STOP, and they fall back to zero velocity when no message arrives for
+// 500 ms (dead man, timed on message arrival); the pushrod works in ENABLED
+// and the three mode states, and holds its position once there. Body feedback
+// is NOT a separate topic: it arrives in joint_states with mixed units
+// distinguished by motor_id (pushrod mm, wheels rad and rad/s).
 
 #include <cstdint>
 #include <vector>

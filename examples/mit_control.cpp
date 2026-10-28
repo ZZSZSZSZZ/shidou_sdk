@@ -1,208 +1,163 @@
-// MIT 目标流示例：本示例演示如何使用SDK按臂布局对 MIT 关节做位置扫动。
-// 流程：GetRobotState 查询状态 → 不在 ENABLED 则先 Enable → SetMode(POSITION) → 以 100 Hz 下发 SendJointMITTarget → 扫动结束切回 ENABLED。
-// 扫动电机取每臂末端，电机号由 arm_info 的自由度得出（左臂 = dof，右臂 = dof + 7）；单臂扫动一个电机，双臂依次扫动（先左后右）。
-// 每个电机从当前位置出发，直线插值走三段：当前位置 → 0.3 (1 秒) → 0.3 (1 秒) → 0 (1 秒)。JointMITTarget 字段：positions 为目标角，
-// velocities 为速度前馈（取段内斜率），kps/kds 为关节刚度/阻尼（示例值），torques 留空即前馈力矩 0。
-// 注意：模式命令只能从 ENABLED 发起（STOP 状态只接受 enabled），
-// 切 POSITION 前先确认当前状态；扫动结束切回 ENABLED。
+// MIT 关节示例：每条臂的末端电机从当前位置走一个来回（+0.3 rad 再回原位），
+// 100 Hz 下发 JointMITTarget（位置 + 速度前馈 + 刚度/阻尼）。
+// MIT 目标只在 FSM 处于 MIT 态时被接受，模式由 SetMode(MIT) 切换；灵足臂支持 MIT，
+// EYOU 臂请用 pp_control。
+//
+// 流程：查询状态与臂型 → 进入 MIT → 逐电机扫动 → 切回 ENABLED。
 //
 // 用法：mit_control [<ip>:<port>] [namespace]
-// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
-// namespace 时显式传空串：mit_control <ip>:<port> ""
-// 用法与缺省值也可以直接问示例：mit_control --help
 
-#include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
 
-#include "example_common.h"
-#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
 namespace {
 
-constexpr std::chrono::milliseconds kPeriod{10};  // 100 Hz 下发
-constexpr double kSegmentSeconds = 1.0;           // 每段 1 秒
-constexpr double kWaypointHigh = 0.3;             // 第一段终点 rad
-constexpr double kWaypointLow = -0.3;             // 第二段终点 rad
-constexpr double kWaypointHome = 0.0;             // 回零目标 rad
-constexpr double kGainKp = 40.0;                  // 关节刚度（示例值，可按需调整）
-constexpr double kGainKd = 2.0;                   // 关节阻尼（示例值，可按需调整）
+constexpr std::chrono::milliseconds kPeriod{10};  // 目标下发周期：10 ms = 100 Hz
+constexpr int kSteps = 100;                       // 单程步数；100 步 × 10 ms = 1 秒
+constexpr double kSegmentSeconds = 1.0;           // 单程时长 s，须与步数 × 周期一致
+constexpr double kAmplitude = 0.3;  // 单程摆幅 rad（示例值，可按需调整）
+constexpr double kGainKp = 40.0;    // 关节刚度（示例值）
+constexpr double kGainKd = 2.0;     // 关节阻尼（示例值）
 
-// 扫动电机取每臂末端：末端电机号 = 自由度（左臂 dof、右臂 dof + 7）。
+// 解析十进制非负整数；arm_info 的自由度段用它读取。
+bool ParseInt(const std::string& text, int& value) {
+    if (text.empty()) {
+        return false;
+    }
+    char* end = nullptr;
+    const long parsed = std::strtol(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0' || parsed < 0) {
+        return false;
+    }
+    value = static_cast<int>(parsed);
+    return true;
+}
+
+// arm_info 的解析结果：装了哪一侧、各侧自由度；末端电机号 = 左 dof、右 dof + 7。
 struct ArmLayout {
     bool has_left = false;
     bool has_right = false;
-    int left_dof = 0;   // 左臂自由度（末端电机号 = left_dof）
-    int right_dof = 0;  // 右臂自由度（末端电机号 = right_dof + 7）
+    int left_dof = 0;
+    int right_dof = 0;
 };
 
-// 解析 arm_info（"{构型}_{自由度}"，构型段为 left / right / dual；
-// 自由度段为 "5" / "7" 或双臂不同的 "5x7"（左x右））。
-bool ParseArmLayout(const std::string& arm_info, ArmLayout& out) {
-    std::vector<std::string> segs;
-    std::string cur;
-    for (char c : arm_info) {
-        if (c == '_') {
-            segs.push_back(cur);
-            cur.clear();
-        } else {
-            cur += c;
-        }
+// 从 arm_info 找出构型段：left_7 / right_7 / dual_5x7；旧版机器人带电机家族前缀
+// （如 EYOU_left_7），非构型段跳过。解析失败返回 false。
+bool ParseArmLayout(const std::string& arm_info, ArmLayout& layout) {
+    std::stringstream stream(arm_info);
+    std::vector<std::string> segments;
+    for (std::string part; std::getline(stream, part, '_');) {
+        segments.push_back(part);
     }
-    segs.push_back(cur);
-
-    // 自由度段解析："5" → 左=右=5；"5x7" → 左=5、右=7。非法段返回 false。
-    const auto parse_dof = [](const std::string& s, int& left, int& right) {
-        const size_t x = s.find('x');
-        const std::string ls = (x == std::string::npos) ? s : s.substr(0, x);
-        const std::string rs = (x == std::string::npos) ? s : s.substr(x + 1);
-        const auto to_int = [](const std::string& t, int& v) {
-            if (t.empty()) {
+    for (size_t i = 0; i + 1 < segments.size(); ++i) {
+        const std::string& side = segments[i];
+        if (side != "left" && side != "right" && side != "dual") {
+            continue;
+        }
+        const std::string& dof = segments[i + 1];
+        const size_t x = dof.find('x');
+        int left = 0;
+        int right = 0;
+        if (x == std::string::npos) {
+            if (!ParseInt(dof, left)) {
                 return false;
             }
-            int acc = 0;
-            for (char c : t) {
-                if (c < '0' || c > '9') {
-                    return false;
-                }
-                acc = acc * 10 + (c - '0');
-            }
-            v = acc;
-            return true;
-        };
-        return to_int(ls, left) && to_int(rs, right);
-    };
-
-    for (size_t i = 0; i + 1 < segs.size(); ++i) {
-        if (segs[i] != "left" && segs[i] != "right" && segs[i] != "dual") {
-            continue;  // 非构型段跳过，不解析其后的段
-        }
-        int l = 0;
-        int r = 0;
-        if (!parse_dof(segs[i + 1], l, r)) {
+            right = left;
+        } else if (!ParseInt(dof.substr(0, x), left) ||
+                   !ParseInt(dof.substr(x + 1), right)) {
             return false;
         }
-        if (segs[i] == "left") {
-            out.has_left = true;
-            out.left_dof = l;
-            return true;
-        }
-        if (segs[i] == "right") {
-            out.has_right = true;
-            out.right_dof = r;
-            return true;
-        }
-        if (segs[i] == "dual") {
-            out.has_left = true;
-            out.has_right = true;
-            out.left_dof = l;
-            out.right_dof = r;
-            return true;
-        }
+        layout.has_left = side != "right";
+        layout.has_right = side != "left";
+        layout.left_dof = layout.has_left ? left : 0;
+        layout.right_dof = layout.has_right ? right : 0;
+        return true;
     }
     return false;
 }
 
-// 从 get_state 快照中找电机当前位置；快照没有该电机时回退 0 并告警。
-double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id,
-                       example::Verdicts& verdicts) {
+// 从 get_state 快照中找电机当前位置；快照没有该电机时回退 0。
+double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id) {
     for (size_t i = 0; i < state.motor_ids.size() && i < state.positions.size(); ++i) {
         if (state.motor_ids[i] == motor_id) {
             return state.positions[i];
         }
     }
-    verdicts.Warn("motor %u not in get_state snapshot, sweep from 0", motor_id);
+    std::printf("motor %u not in get_state snapshot, sweep from 0\n", motor_id);
     return 0.0;
 }
 
-// 单电机三段直线插值扫动：start → 0.3 (1 s) → -0.3 (1 s) → 0 (1 s)。
-// 段内以实际经过时间为插值变量，睡眠抖动不累积；velocity 取段内斜率做
-// 速度前馈，kp/kd 固定为示例值。每段结束补发终点帧，保证段间衔接与
-// 最终停位精确。
-bool SweepMotor(shidou::robot::Robot& robot, example::Verdicts& verdicts, uint32_t motor_id,
-                double start) {
-    const std::array<double, 4> waypoints{start, kWaypointHigh, kWaypointLow, kWaypointHome};
-    std::printf("motor %u: %.3f -> %.3f -> %.3f -> %.3f (%.0f s per segment)\n", motor_id,
-                waypoints[0], waypoints[1], waypoints[2], waypoints[3], kSegmentSeconds);
-    for (size_t seg = 0; seg + 1 < waypoints.size(); ++seg) {
-        const double from = waypoints[seg];
-        const double to = waypoints[seg + 1];
-        const double slope = (to - from) / kSegmentSeconds;  // 段内速度前馈 rad/s
-        const auto t0 = std::chrono::steady_clock::now();
-        for (;;) {
-            const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0)
-                                 .count();
-            if (t >= kSegmentSeconds) {
-                break;
-            }
+// 单电机来回扫动：start → start + kAmplitude → start，每程 kSteps 步线性插值，
+// 速度前馈取段内斜率；每程末尾补发一帧终点并把速度前馈清零，避免机器人端按
+// 残余前馈继续推进。返回 false 表示下发失败，错误消息已打印。
+bool SweepMotor(shidou::robot::Robot& robot, uint32_t motor_id, double start) {
+    const double peak = start + kAmplitude;
+    std::printf("motor %u: %.3f -> %.3f -> %.3f (%.0f s each way)\n", motor_id, start, peak,
+                start, kSegmentSeconds);
+    for (int direction = 0; direction < 2; ++direction) {
+        const double from = direction == 0 ? start : peak;
+        const double to = direction == 0 ? peak : start;
+        // 段内按比例细分目标位置；velocity 是该段的平均速度，作为前馈下发。
+        const double velocity = (to - from) / kSegmentSeconds;
+        for (int step = 1; step <= kSteps; ++step) {
             shidou::msg::JointMITTarget target;
             target.motor_ids = {motor_id};
-            target.positions = {from + (to - from) * (t / kSegmentSeconds)};
-            target.velocities = {slope};
+            target.positions = {from + (to - from) * step / kSteps};
+            target.velocities = {velocity};
             target.kps = {kGainKp};
             target.kds = {kGainKd};
             // torques 不填 = 前馈力矩 0。
             const shidou::robot::Result sent = robot.SendJointMITTarget(target);
             if (!sent) {
-                verdicts.Fail("publish motor %u: %s", motor_id, sent.message.c_str());
+                std::printf("SendJointMITTarget: %s\n", sent.message.c_str());
                 return false;
             }
             std::this_thread::sleep_for(kPeriod);
         }
+        // 终点帧：位置停在 to，速度前馈清零。
         shidou::msg::JointMITTarget end_frame;
         end_frame.motor_ids = {motor_id};
         end_frame.positions = {to};
-        end_frame.velocities = {0.0};  // 段末速度前馈清零，停在终点
+        end_frame.velocities = {0.0};
         end_frame.kps = {kGainKp};
         end_frame.kds = {kGainKd};
         const shidou::robot::Result sent = robot.SendJointMITTarget(end_frame);
         if (!sent) {
-            verdicts.Fail("publish motor %u: %s", motor_id, sent.message.c_str());
+            std::printf("SendJointMITTarget: %s\n", sent.message.c_str());
             return false;
         }
     }
     return true;
 }
 
-// 扫动流程：查状态 → 必要时 Enable → 解析臂布局 → 切 POSITION → 依次扫动 → 切回 ENABLED。
-void SweepJoints(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
-                 example::Verdicts& verdicts) {
-    // 先查状态：arm_info 决定扫动电机，fsm_state 决定是否需要先 Enable。
+int SweepJoints(shidou::robot::Robot& robot) {
     shidou::robot::RobotState state;
-    const shidou::robot::Result state_result = robot.GetRobotState(state);
-    if (!state_result) {
-        verdicts.Fail("GetRobotState: %s", state_result.message.c_str());
-        return;
+    const shidou::robot::Result queried = robot.GetRobotState(state);
+    if (!queried) {
+        std::printf("GetRobotState: %s\n", queried.message.c_str());
+        return 1;
     }
     std::printf("arm_info=%s\n", state.arm_info.c_str());
     std::printf("fsm_state=%s\n", state.fsm_state.c_str());
 
-    // 模式命令只能从 ENABLED 发起（STOP 态只接受 enabled，不能直接切模式），
-    // 当前不在 ENABLED 时先 Enable 握手。
-    if (state.fsm_state != shidou::robot::kFsmStateEnabled) {
-        const shidou::robot::Result enabled = robot.Enable();
-        if (!enabled) {
-            verdicts.Fail("Enable: %s", enabled.message.c_str());
-            return;
-        }
-        std::printf("fsm_state=%s\n", robot.FsmState().c_str());
-    }
-
+    // arm_info 决定哪几条臂参与扫动，以及各自的末端电机号。
     ArmLayout layout;
     if (!ParseArmLayout(state.arm_info, layout)) {
-        verdicts.Fail("arm_info=%s: cannot parse layout/dof", state.arm_info.c_str());
-        return;
+        std::printf("arm_info=%s: cannot parse layout/dof\n", state.arm_info.c_str());
+        return 1;
     }
-    const char* layout_name =
-        layout.has_left && layout.has_right ? "dual" : (layout.has_left ? "left" : "right");
-    std::printf("arm layout: %s (left dof=%d, right dof=%d)\n", layout_name, layout.left_dof,
-                layout.right_dof);
+    std::printf("arm layout: %s (left dof=%d, right dof=%d)\n",
+                layout.has_left && layout.has_right ? "dual"
+                                                    : (layout.has_left ? "left" : "right"),
+                layout.left_dof, layout.right_dof);
 
-    // 末端电机号由自由度得出：左 = dof、右 = dof + 7；双臂依次（先左后右）。
     std::vector<uint32_t> motors;
     if (layout.has_left) {
         motors.push_back(static_cast<uint32_t>(layout.left_dof));
@@ -211,33 +166,50 @@ void SweepJoints(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig&,
         motors.push_back(static_cast<uint32_t>(layout.right_dof + 7));
     }
 
-    // MIT 目标由 POSITION 状态消费：先握手切入 POSITION 模式，确认后开始扫动。
-    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kPosition);
-    if (!mode) {
-        verdicts.Fail("SetMode(POSITION): %s", mode.message.c_str());
-        return;
+    // STOP 下 set_mode 回 busy，先使能。
+    if (state.fsm_state == shidou::robot::kFsmStateStop) {
+        const shidou::robot::Result enabled = robot.Enable();
+        if (!enabled) {
+            std::printf("Enable: %s\n", enabled.message.c_str());
+            return 1;
+        }
     }
-    std::printf("fsm_state=%s, sweeping %zu motor(s)\n", robot.FsmState().c_str(),
-                motors.size());
+    // 切到 MIT：机器人先停驱动再重新使能，期间短暂失力。
+    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kMit);
+    if (!mode) {
+        std::printf("SetMode(MIT): %s\n", mode.message.c_str());
+        return 1;
+    }
+    // 状态由 set_mode 回执后刷新，确认已进入 MIT。
+    std::printf("fsm_state=%s\n", robot.FsmState().c_str());
 
     for (uint32_t motor_id : motors) {
-        if (!SweepMotor(robot, verdicts, motor_id, CurrentPosition(state, motor_id, verdicts))) {
-            return;
+        if (!SweepMotor(robot, motor_id, CurrentPosition(state, motor_id))) {
+            return 1;
         }
     }
 
-    // 扫动结束切回 ENABLED，机器人回到可再次接收模式命令的状态。
+    // 回到 ENABLED；机械臂未停稳时 Enable 自动重发。
     const shidou::robot::Result enabled = robot.Enable();
     if (!enabled) {
-        verdicts.Fail("Enable: %s", enabled.message.c_str());
-        return;
+        std::printf("Enable: %s\n", enabled.message.c_str());
+        return 1;
     }
-    verdicts.Pass("Enable -> fsm_state=%s", robot.FsmState().c_str());
+    // 打印最终状态，确认回到 ENABLED。
+    std::printf("fsm_state=%s\n", robot.FsmState().c_str());
+    return 0;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    // MIT 扫动没有自己的参数：位置参数只有 [<ip>:<port>] 与 [namespace]。
-    return example::Run(argc, argv, {}, SweepJoints);
+    const std::string address = argc > 1 ? argv[1] : "192.168.168.168:7447";
+    const std::string robot_namespace = argc > 2 ? argv[2] : "robot168";
+
+    shidou::robot::Robot robot(address, robot_namespace);
+    if (!robot.Ready()) {
+        std::printf("robot init failed: %s\n", robot.LastError().c_str());
+        return 1;
+    }
+    return SweepJoints(robot);
 }

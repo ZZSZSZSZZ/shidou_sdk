@@ -1,25 +1,31 @@
 #pragma once
 
-// FSM vocabulary shared with the robot side: the command strings
-// accepted on fsm_command and the state names published on fsm_state.
-// The robot receives commands case-insensitively but publishes states
-// uppercase.
+// FSM vocabulary shared with the robot side: the control modes, the tokens
+// the run_command service accepts in its `mode` field, and the state names
+// published on fsm_state. The robot receives commands from one service and
+// publishes state names uppercase.
+//
+// One control mode owns one FSM state, and the state name is the mode name:
+// MIT / CSP / PP. A joint target is accepted only while the robot is in its
+// mode's state, and only if the drives really are in that mode. The mode is
+// set exclusively through the run_command service; target streams never
+// change it. ENABLED is the damping hold (no joint targets) and STOP the
+// disabled state, left only by an enable command.
 
 namespace shidou::robot {
 
-// Control modes selectable after the ENABLED handshake.
 enum class ControlMode {
-    kCsp,        // CSP drives: JointCSPTarget streams
-    kPosition,   // CSP drives: JointPositionTarget streams
-    kTrajectory, // run the trajectory uploaded via the joint_trajectory service
+    kMit, // JointMITTarget streams; accepted in MIT
+    kCsp, // JointCSPTarget streams; accepted in CSP
+    kPp,  // JointPositionTarget streams; accepted in PP
 };
 
-// fsm_command payload for a mode.
-inline const char* ToCommand(ControlMode mode) {
+// Mode token for the run_command service's `mode` field.
+inline const char* ToModeToken(ControlMode mode) {
     switch (mode) {
+        case ControlMode::kMit: return "mit";
         case ControlMode::kCsp: return "csp";
-        case ControlMode::kPosition: return "position";
-        case ControlMode::kTrajectory: return "trajectory";
+        case ControlMode::kPp: return "pp";
     }
     return "";
 }
@@ -27,14 +33,14 @@ inline const char* ToCommand(ControlMode mode) {
 // fsm_state value while the mode is active.
 inline const char* ToFsmState(ControlMode mode) {
     switch (mode) {
+        case ControlMode::kMit: return "MIT";
         case ControlMode::kCsp: return "CSP";
-        case ControlMode::kPosition: return "POSITION";
-        case ControlMode::kTrajectory: return "TRAJECTORY";
+        case ControlMode::kPp: return "PP";
     }
     return "";
 }
 
-// FSM state names; STOP only accepts the "enabled" command.
+// FSM states without a mode of their own.
 inline constexpr const char* kFsmStateEnabled = "ENABLED";
 inline constexpr const char* kFsmStateStop = "STOP";
 

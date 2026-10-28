@@ -119,10 +119,10 @@ bool WriteSeqStruct(WriteBuffer& out, const std::vector<T>& v) {
     return true;
 }
 
-// Every string field starts with a 4-byte length prefix, so a decoder that
-// has to decide whether a field declared later is present at all can rule it
-// out by what is left: fewer bytes than the prefix cannot hold one.
-constexpr size_t kStringLengthPrefixBytes = 4;
+// Every string and every sequence starts with a 4-byte length word, so a
+// decoder that has to decide whether a field declared later is present at all
+// can rule it out by what is left: fewer bytes than the word cannot hold one.
+constexpr size_t kLengthPrefixBytes = 4;
 
 // String: uint32 byte length counting the trailing NUL, then the bytes.
 // The length check rejects payloads that cannot hold the claimed bytes.
@@ -158,6 +158,43 @@ inline bool WriteString(WriteBuffer& out, const std::string& s) {
     out.WriteU32(static_cast<uint32_t>(s.size()) + 1);
     out.WriteBytes(s.data(), s.size());
     out.WriteU8('\0');
+    return true;
+}
+
+// Sequence of strings: uint32 length, then each element as a string (every
+// element's length word is 4-aligned; the gap left by the previous element's
+// byte count is padding). Decoding rejects a length that could not hold one
+// length word per element before allocating.
+inline bool ReadSeqString(ReadCursor& in, std::vector<std::string>& out) {
+    uint32_t len = 0;
+    if (!in.Align(4) || !in.ReadU32(len)) {
+        return false;
+    }
+    if (len > in.Remaining() / kLengthPrefixBytes) {
+        return false;
+    }
+    out.clear();
+    out.reserve(len);
+    for (uint32_t i = 0; i < len; ++i) {
+        std::string element;
+        if (!ReadString(in, element)) {
+            return false;
+        }
+        out.push_back(std::move(element));
+    }
+    return true;
+}
+
+inline bool WriteSeqString(WriteBuffer& out, const std::vector<std::string>& v) {
+    if (!out.Align(4)) {
+        return false;
+    }
+    out.WriteU32(static_cast<uint32_t>(v.size()));
+    for (const std::string& element : v) {
+        if (!WriteString(out, element)) {
+            return false;
+        }
+    }
     return true;
 }
 

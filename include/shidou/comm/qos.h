@@ -4,8 +4,8 @@
 //
 // This is the single point for QoS tuning. The mapping mirrors the
 // robot-side ROS 2 QoS:
-//   reliable   (fsm_command): congestion BLOCK, not express -- commands
-//               must never be silently dropped, even under backpressure
+//   reliable   : congestion BLOCK, not express -- reliable subscribers must
+//               never be silently dropped, even under backpressure
 //   best_effort (target streams at 100 Hz): congestion DROP, express,
 //               DATA_HIGH priority -- a stale target must never delay a
 //               fresh one

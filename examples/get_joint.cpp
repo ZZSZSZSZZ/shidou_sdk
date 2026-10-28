@@ -1,123 +1,72 @@
-// 关节状态监控示例：本示例演示如何使用SDK订阅遥测关节位置。
-// 用 SetJointFeedbackCallback 订阅遥测，每 500 ms 用 LastFeedback 打印
-// 实时快照，直到可选时长结束。
-// [seconds]为程序遥测时长，当[seconds]为 0（或负数）表示一直运行到进程被杀 —— 适合在机器人旁边工作时挂一个长期监控。
+// 只读示例：每 500 ms 用 LastFeedback 打印一帧最新关节反馈，共 10 帧、5 秒。
+// 逐电机打印位置、速度、力矩、使能、在线、故障码与温度，用来在机器人旁确认
+// 遥测链路与电机在线情况。不下发任何目标。
 //
-// 当样本停止到达（如网络异常中断）时，缓存的最后一帧会带着不断增长的 age 和 STALE 标记继续打印，并触发一次 [WARN] 警告；
+// 流程：构造 Robot（订阅在后台线程收包）→ 循环取缓存快照 → 打印 seq/age 与
+// 每个电机的全部反馈字段。
 //
-// 用法：get_joint [seconds] [<ip>:<port>] [namespace]
-// namespace 须与机器人侧桥配置的 namespace 完全一致（缺省 robot168）；桥未启用
-// namespace 时显式传空串：get_joint <seconds> <ip>:<port> ""
-// 用法与缺省值也可以直接问示例：get_joint --help
+// 用法：get_joint [<ip>:<port>] [namespace]
 
-#include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <string>
 #include <thread>
+#include <vector>
 
-#include "example_common.h"
-#include "shidou/comm/options.h"
 #include "shidou/robot/robot.h"
 
 namespace {
 
-constexpr std::chrono::milliseconds kPrintInterval{500};
-// 遥测是连续流；沉默超过该阈值即触发 stale 回调。
-constexpr std::chrono::milliseconds kStaleThreshold{1000};
-
-void PrintSnapshot(const shidou::msg::JointFeedback& fb, uint64_t seq,
-                   double age_ms, const std::string& fsm, bool stale) {
-    std::printf("fsm=%s seq=%llu age=%.1f ms%s motors=%zu\n", fsm.c_str(),
-                static_cast<unsigned long long>(seq), age_ms,
-                stale ? " [STALE]" : "", fb.motor_ids.size());
-    for (size_t i = 0; i < fb.motor_ids.size(); ++i) {
-        const double pos = i < fb.position.size() ? fb.position[i] : 0.0;
-        const double vel = i < fb.velocity.size() ? fb.velocity[i] : 0.0;
-        const double eff = i < fb.effort.size() ? fb.effort[i] : 0.0;
-        const float tmp = i < fb.temperature.size() ? fb.temperature[i] : 0.0f;
-        const uint32_t fault = i < fb.fault_code.size() ? fb.fault_code[i] : 0u;
-        const uint8_t online = i < fb.online.size() ? fb.online[i] : 0u;
-        std::printf("  motor %2u  pos=% 8.4f  vel=% 7.4f  eff=% 6.3f  temp=%5.1f  fault=0x%04x  online=%u\n",
-                    fb.motor_ids[i], pos, vel, eff, tmp, fault, online);
-    }
-}
-
-// 订阅与打印：每 500 ms 打一帧快照，直到 seconds 用完（<= 0 表示一直运行到进程被杀）。
-void MonitorJoints(shidou::robot::Robot& robot, const shidou::comm::ZenohConfig& cfg,
-                   example::Verdicts& verdicts, double seconds) {
-    std::printf("monitoring %s for %.0f s (0 = until killed)...\n", cfg.robot_address.c_str(),
-                seconds);
-
-    // 精确接收计数：缓存只保留最新样本，轮询缓存会少算；回调每个样本触发一次。
-    std::atomic<uint64_t> received{0};
-    robot.SetJointFeedbackCallback(
-        [&received](const shidou::msg::JointFeedback&) { ++received; });
-    // 每次断流事件只警告一次（收到新样本后重新武装）。
-    robot.SetFeedbackStaleCallback(kStaleThreshold, [&verdicts](double age_ms) {
-        verdicts.Warn("no telemetry for %.0f ms (link or robot node down?)", age_ms);
-    });
-
-    bool have_feedback = false;
-    double age_min = 0.0;
-    double age_max = 0.0;
-    const auto start = std::chrono::steady_clock::now();
-    while (seconds <= 0.0 ||
-           std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count() <
-               seconds) {
-        std::this_thread::sleep_for(kPrintInterval);
-
-        shidou::msg::JointFeedback fb;
-        if (!robot.LastFeedback(fb)) {
-            std::printf("no feedback yet\n");
-            continue;
-        }
-        const double age = robot.FeedbackAgeMs();
-        if (!have_feedback) {
-            have_feedback = true;
-            age_min = age_max = age;
-        } else {
-            if (age < age_min) age_min = age;
-            if (age > age_max) age_max = age;
-        }
-        PrintSnapshot(fb, robot.FeedbackSeq(), age, robot.FsmState(),
-                      age > static_cast<double>(kStaleThreshold.count()));
-    }
-
-    const double elapsed =
-        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    const uint64_t samples = received.load();
-    if (samples == 0) {
-        verdicts.Fail("no feedback received");
-        return;
-    }
-    std::printf("received %llu samples in %.1f s (~%.1f Hz), age %.1f..%.1f ms\n",
-                static_cast<unsigned long long>(samples), elapsed,
-                elapsed > 0.0 ? samples / elapsed : 0.0, age_min, age_max);
-    verdicts.Pass("get_joint completed");
+// 反馈的各数组按 motor_ids 索引对齐；个别数组缺项时给出缺省值，避免越界。
+template <typename T>
+T At(const std::vector<T>& values, size_t index, T fallback) {
+    return index < values.size() ? values[index] : fallback;
 }
 
 } // namespace
 
 int main(int argc, char** argv) {
-    // 监控进程在 stdout 被重定向到文件时也必须即时打印（全缓冲会把输出
-    // 拖到进程退出才落盘）。
-    std::setvbuf(stdout, nullptr, _IONBF, 0);
+    const std::string address = argc > 1 ? argv[1] : "192.168.168.168:7447";
+    const std::string robot_namespace = argc > 2 ? argv[2] : "robot168";
 
-    // 运行时长（秒）；<= 0 表示一直运行到进程被杀。缺省值写在下面的参数声明里，
-    // 与显式取值走同一条解析路径；非数字必须是非法调用——静默取 0 等于把有界监控
-    // 变成一直运行到进程被杀。
-    double seconds = 0.0;
-    const example::PositionalArg seconds_arg{
-        "seconds",
-        "10",
-        "telemetry duration in seconds; 0 or negative runs until the process is killed",
-        example::ParseDouble("seconds", "a number", seconds)};
+    shidou::robot::Robot robot(address, robot_namespace);
+    if (!robot.Ready()) {
+        std::printf("robot init failed: %s\n", robot.LastError().c_str());
+        return 1;
+    }
 
-    return example::Run(argc, argv, {seconds_arg},
-                        [&seconds](shidou::robot::Robot& robot,
-                                   const shidou::comm::ZenohConfig& cfg,
-                                   example::Verdicts& verdicts) {
-        MonitorJoints(robot, cfg, verdicts, seconds);
-    });
+    // 表头与数据行用同一组列宽，保证两处对齐。
+    std::printf("%6s  %8s  %10s  %8s  %7s  %7s  %6s  %5s\n", "motor", "pos(rad)",
+                "vel(rad/s)", "eff(Nm)", "temp(C)", "enabled", "online", "fault");
+
+    // 10 帧 × 500 ms = 5 秒。
+    for (int frame = 0; frame < 10; ++frame) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+
+        shidou::msg::JointFeedback feedback;
+        // LastFeedback 读的是缓存里的最新一帧；还没有样本时返回 false。
+        if (!robot.LastFeedback(feedback)) {
+            std::printf("no feedback yet\n");
+            continue;
+        }
+        // age 是这帧的年龄；持续变大说明遥测断流。
+        std::printf("fsm=%s seq=%llu age=%.1f ms motors=%zu\n", robot.FsmState().c_str(),
+                    static_cast<unsigned long long>(robot.FeedbackSeq()),
+                    robot.FeedbackAgeMs(), feedback.motor_ids.size());
+        // enabled/online 是 0/1：enabled = 该电机已使能，online = 未禁用且状态新鲜；
+        // fault 0 = 无故障。
+        for (size_t i = 0; i < feedback.motor_ids.size(); ++i) {
+            std::printf("%6u  %8.4f  %10.4f  %8.4f  %7.1f  %7u  %6u  %5u\n",
+                        feedback.motor_ids[i],
+                        At(feedback.position, i, 0.0),
+                        At(feedback.velocity, i, 0.0),
+                        At(feedback.effort, i, 0.0),
+                        At(feedback.temperature, i, 0.0f),
+                        static_cast<unsigned>(At(feedback.enabled, i, uint8_t{0})),
+                        static_cast<unsigned>(At(feedback.online, i, uint8_t{0})),
+                        At(feedback.fault_code, i, uint32_t{0}));
+        }
+    }
+    return 0;
 }

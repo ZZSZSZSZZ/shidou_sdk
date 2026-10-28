@@ -4,22 +4,18 @@
 //
 // Field order here is the wire contract: it must match the robot-side ROS
 // message definitions exactly. Change both sides together or never.
-// Primitive layout follows codec/cdr.h; a
-// service request whose first member is a struct starts that struct at
-// offset 0, so encoding the member directly is wire-identical.
+// Primitive layout follows codec/cdr.h.
 
 #include "shidou/codec/cdr.h"
 #include "shidou/msg/body_target.h"
 #include "shidou/msg/get_state.h"
 #include "shidou/msg/gripper_target.h"
-#include "shidou/msg/header.h"
 #include "shidou/msg/joint_csp_target.h"
 #include "shidou/msg/joint_feedback.h"
 #include "shidou/msg/joint_mit_target.h"
 #include "shidou/msg/joint_position_target.h"
-#include "shidou/msg/joint_trajectory.h"
+#include "shidou/msg/run_command.h"
 #include "shidou/msg/string_msg.h"
-#include "shidou/msg/trajectory_srv.h"
 
 namespace shidou::msg {
 
@@ -29,18 +25,6 @@ inline bool String::Encode(codec::WriteBuffer& out) const {
 
 inline bool String::Decode(codec::ReadCursor& in) {
     return codec::ReadString(in, data);
-}
-
-inline bool Header::Encode(codec::WriteBuffer& out) const {
-    // stamp: fixed 8-byte pair, no padding; frame_id follows 4-aligned.
-    out.WriteI32(stamp_sec);
-    out.WriteU32(stamp_nanosec);
-    return codec::WriteString(out, frame_id);
-}
-
-inline bool Header::Decode(codec::ReadCursor& in) {
-    return in.ReadI32(stamp_sec) && in.ReadU32(stamp_nanosec) &&
-           codec::ReadString(in, frame_id);
 }
 
 inline bool JointFeedback::Encode(codec::WriteBuffer& out) const {
@@ -120,34 +104,24 @@ inline bool GripperTarget::Decode(codec::ReadCursor& in) {
            codec::ReadSeq(in, kps) && codec::ReadSeq(in, kds);
 }
 
-inline bool MITWaypoint::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteSeq(out, positions) && codec::WriteSeq(out, velocities) &&
-           codec::WriteSeq(out, torques) && codec::WriteBool(out, stop_point);
+inline bool RunCommandRequest::Encode(codec::WriteBuffer& out) const {
+    return codec::WriteString(out, command) && codec::WriteString(out, mode);
 }
 
-inline bool MITWaypoint::Decode(codec::ReadCursor& in) {
-    return codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
-           codec::ReadSeq(in, torques) && codec::ReadBool(in, stop_point);
+inline bool RunCommandRequest::Decode(codec::ReadCursor& in) {
+    return codec::ReadString(in, command) && codec::ReadString(in, mode);
 }
 
-inline bool CSPWaypoint::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteSeq(out, positions) && codec::WriteSeq(out, max_velocity) &&
-           codec::WriteSeq(out, max_acceleration) && codec::WriteSeq(out, torques);
+inline bool RunCommandResponse::Encode(codec::WriteBuffer& out) const {
+    // accepted is one byte; WriteString aligns to 4, so it lands after the
+    // padding ROS serialization puts between a bool and a string field.
+    return codec::WriteBool(out, accepted) && codec::WriteString(out, code) &&
+           codec::WriteString(out, message);
 }
 
-inline bool CSPWaypoint::Decode(codec::ReadCursor& in) {
-    return codec::ReadSeq(in, positions) && codec::ReadSeq(in, max_velocity) &&
-           codec::ReadSeq(in, max_acceleration) && codec::ReadSeq(in, torques);
-}
-
-inline bool JointTrajectory::Encode(codec::WriteBuffer& out) const {
-    return header.Encode(out) && codec::WriteSeq(out, joint_id) &&
-           codec::WriteSeqStruct(out, mit_points) && codec::WriteSeqStruct(out, csp_points);
-}
-
-inline bool JointTrajectory::Decode(codec::ReadCursor& in) {
-    return header.Decode(in) && codec::ReadSeq(in, joint_id) &&
-           codec::ReadSeqStruct(in, mit_points) && codec::ReadSeqStruct(in, csp_points);
+inline bool RunCommandResponse::Decode(codec::ReadCursor& in) {
+    return codec::ReadBool(in, accepted) && codec::ReadString(in, code) &&
+           codec::ReadString(in, message);
 }
 
 inline bool GetStateRequest::Encode(codec::WriteBuffer& out) const {
@@ -172,7 +146,8 @@ inline bool GetStateResponse::Encode(codec::WriteBuffer& out) const {
     out.WriteF64(control_cycle_avg_ms);
     out.WriteF64(control_cycle_max_ms);
     return codec::WriteU32Aligned(out, cycle_overruns) && codec::WriteString(out, model) &&
-           codec::WriteString(out, body_info);
+           codec::WriteString(out, body_info) && codec::WriteSeqString(out, control_mode) &&
+           codec::WriteSeqString(out, control_mode_confidence);
 }
 
 inline bool GetStateResponse::Decode(codec::ReadCursor& in) {
@@ -184,41 +159,28 @@ inline bool GetStateResponse::Decode(codec::ReadCursor& in) {
           in.ReadF64(control_cycle_max_ms) && codec::ReadU32Aligned(in, cycle_overruns))) {
         return false;
     }
-    // Additive tail: model and body_info were appended to the reply in that
-    // order, so a robot may end the body at the last statistic (predating
-    // both), carry model only, or carry both. Padding the body to a 4-byte
-    // boundary adds at most 3 zero bytes and a string field always starts
-    // with a 4-byte length prefix, so fewer bytes left than that is padding,
-    // not a field, and ends the tail. Whatever is left unread after this is
-    // still subject to the frame's own trailing-byte rule (at most 3 zero
-    // bytes).
-    if (in.Remaining() >= codec::kStringLengthPrefixBytes &&
-        !codec::ReadString(in, model)) {
+    // Additive tail: model, body_info, control_mode and control_mode_confidence
+    // were appended to the reply in that order, so a robot may end the body
+    // at the last statistic (predating all four) or stop after any of them.
+    // Padding the body to a 4-byte boundary adds at most 3 zero bytes, and
+    // both a string and a sequence start with a 4-byte length word, so fewer
+    // bytes left than that is padding, not a field, and ends the tail.
+    // Whatever is left unread after this is still subject to the frame's own
+    // trailing-byte rule (at most 3 zero bytes).
+    if (in.Remaining() >= codec::kLengthPrefixBytes && !codec::ReadString(in, model)) {
         return false;
     }
-    if (in.Remaining() >= codec::kStringLengthPrefixBytes &&
-        !codec::ReadString(in, body_info)) {
+    if (in.Remaining() >= codec::kLengthPrefixBytes && !codec::ReadString(in, body_info)) {
+        return false;
+    }
+    if (in.Remaining() >= codec::kLengthPrefixBytes && !codec::ReadSeqString(in, control_mode)) {
+        return false;
+    }
+    if (in.Remaining() >= codec::kLengthPrefixBytes &&
+        !codec::ReadSeqString(in, control_mode_confidence)) {
         return false;
     }
     return true;
-}
-
-inline bool JointTrajectoryRequest::Encode(codec::WriteBuffer& out) const {
-    // First (and only) member starts at offset 0: encoding the member
-    // directly is wire-identical to encoding the request struct.
-    return trajectory.Encode(out);
-}
-
-inline bool JointTrajectoryRequest::Decode(codec::ReadCursor& in) {
-    return trajectory.Decode(in);
-}
-
-inline bool JointTrajectoryResponse::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteBool(out, success);
-}
-
-inline bool JointTrajectoryResponse::Decode(codec::ReadCursor& in) {
-    return codec::ReadBool(in, success);
 }
 
 } // namespace shidou::msg
