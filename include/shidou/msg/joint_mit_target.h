@@ -11,6 +11,11 @@
 namespace shidou::msg {
 
 struct JointMITTarget {
+    // Target sequence: +1 per frame; 0 = unset (the robot then accepts the
+    // frame unconditionally). A non-zero value must advance every frame, or
+    // the robot drops the frame as stale.
+    uint32_t sequence = 0;
+
     std::vector<uint32_t> motor_ids;
     std::vector<double> positions;   // rad
     std::vector<double> velocities;  // rad/s, optional
@@ -24,9 +29,9 @@ struct JointMITTarget {
     bool Decode(codec::ReadCursor& in);
 
     bool operator==(const JointMITTarget& other) const {
-        return motor_ids == other.motor_ids && positions == other.positions &&
-               velocities == other.velocities && torques == other.torques && kps == other.kps &&
-               kds == other.kds;
+        return sequence == other.sequence && motor_ids == other.motor_ids &&
+               positions == other.positions && velocities == other.velocities &&
+               torques == other.torques && kps == other.kps && kds == other.kds;
     }
 };
 

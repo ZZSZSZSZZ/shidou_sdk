@@ -1,9 +1,10 @@
 // MIT 关节示例：每条臂的末端电机从当前位置走一个来回（+0.3 rad 再回原位），
 // 100 Hz 下发 JointMITTarget（位置 + 速度前馈 + 刚度/阻尼）。
-// MIT 目标只在 FSM 处于 MIT 态时被接受，模式由 SetMode(MIT) 切换；灵足臂支持 MIT，
+// MIT 目标只在 FSM 处于 MIT 态时被接受，模式由 SetMode(MIT) 进入；灵足臂支持 MIT，
 // EYOU 臂请用 pp_control。
 //
-// 流程：查询状态与臂型 → 进入 MIT → 逐电机扫动 → 切回 ENABLED。
+// 流程：查询状态与臂型 → Enable(MIT) → SetMode(MIT) → 逐电机扫动 → Enable(MIT)
+// 回 ENABLED。
 //
 // 用法：mit_control [<ip>:<port>] [namespace]
 
@@ -166,21 +167,22 @@ int SweepJoints(shidou::robot::Robot& robot) {
         motors.push_back(static_cast<uint32_t>(layout.right_dof + 7));
     }
 
-    // STOP 下 set_mode 回 busy，先使能。
-    if (state.fsm_state == shidou::robot::kFsmStateStop) {
-        const shidou::robot::Result enabled = robot.Enable();
-        if (!enabled) {
-            std::printf("Enable: %s\n", enabled.message.c_str());
-            return 1;
-        }
-    }
-    // 切到 MIT：机器人先停驱动再重新使能，期间短暂失力。
-    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kMit);
-    if (!mode) {
-        std::printf("SetMode(MIT): %s\n", mode.message.c_str());
+    // 先使能，并把保持律选成 MIT：落点仍是 ENABLED，只是停住时按 MIT 做速度阻尼
+    // （刚度为零）。从 STOP 出发必须走这一步：STOP 下 SetMode 回 busy，因为模式态
+    // 自己不会使能。
+    const shidou::robot::Result enabled = robot.Enable(shidou::robot::ControlMode::kMit);
+    if (!enabled) {
+        std::printf("Enable(MIT): %s\n", enabled.message.c_str());
         return 1;
     }
-    // 状态由 set_mode 回执后刷新，确认已进入 MIT。
+    // 再切 MIT 状态：保持律已经是 MIT，SetMode 只剩状态迁移，不再重复那段停驱动 →
+    // 写电机模式 → 重新使能的序列。切换排队到当前运动停稳后执行。
+    const shidou::robot::Result switched = robot.SetMode(shidou::robot::ControlMode::kMit);
+    if (!switched) {
+        std::printf("SetMode(MIT): %s\n", switched.message.c_str());
+        return 1;
+    }
+    // 打印状态，确认已在 MIT。
     std::printf("fsm_state=%s\n", robot.FsmState().c_str());
 
     for (uint32_t motor_id : motors) {
@@ -189,10 +191,11 @@ int SweepJoints(shidou::robot::Robot& robot) {
         }
     }
 
-    // 回到 ENABLED；机械臂未停稳时 Enable 自动重发。
-    const shidou::robot::Result enabled = robot.Enable();
-    if (!enabled) {
-        std::printf("Enable: %s\n", enabled.message.c_str());
+    // 回到 ENABLED：同样带上 MIT 词元，停住时仍是速度阻尼。扫动刚结束时手臂可能
+    // 还在动，机器人回 rejected_moving，Enable 自动重发，停稳后落到 ENABLED。
+    const shidou::robot::Result restored = robot.Enable(shidou::robot::ControlMode::kMit);
+    if (!restored) {
+        std::printf("Enable(MIT): %s\n", restored.message.c_str());
         return 1;
     }
     // 打印最终状态，确认回到 ENABLED。

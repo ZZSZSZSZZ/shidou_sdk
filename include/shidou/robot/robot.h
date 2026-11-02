@@ -26,6 +26,7 @@
 // comm objects: call it only with no other operation on this robot in flight, and
 // never from zenoh session threads.
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <functional>
@@ -122,10 +123,11 @@ public:
     // transport failure, a request the robot refused (the message carries
     // its code and text), or a wait that timed out.
     //
-    // Enable() asks for the damping hold. The arm enters its mode states
-    // only through SetMode(), and only from ENABLED or another mode state -
-    // STOP leaves only by Enable(). While a mode is running, an enable that
-    // would pull the control law out from under a moving arm is answered
+    // Enable() asks for the damping hold: the robot enables the arm and
+    // lands it in ENABLED, holding with the law the family auto-detects
+    // (LingZu mit, EYOU csp, anything else pp). The arm also leaves STOP
+    // through this call. While a mode state is running targets, an enable
+    // that would pull the control law out from under it is answered
     // rejected_moving; Enable() resends it until the timeout, so returning
     // success still means the robot is in ENABLED.
     Result Enable(std::chrono::milliseconds timeout = kEnableTimeout);
@@ -138,11 +140,18 @@ public:
     // accepts a new mode while disabled), so the arm briefly loses torque
     // while the robot runs that sequence.
     Result SetMode(ControlMode mode, std::chrono::milliseconds timeout = kModeSwitchTimeout);
-    // Same edge as Enable(), with a mode token in the request. The robot
-    // does not read the mode field of `enable` (its receipt says the mode
-    // was ignored), so this call lands in ENABLED as well - the damping
-    // hold runs in the robot's own default drive mode. Entering MIT, CSP or
-    // PP still takes SetMode(mode).
+    // The enable edge with the hold law chosen. The robot enables the arm
+    // and lands it in ENABLED exactly like Enable(), but ENABLED then holds
+    // in place with `mode`: mit damps velocity, csp/pp leave the drives'
+    // own position loop holding at the measured position (not a latched
+    // setpoint - if the arm is pushed aside it stays there). No target
+    // topic is accepted in ENABLED. SetMode is still the only way into a
+    // mode state; Enable(mode) followed by SetMode(mode) then only changes
+    // state, because the drives already run that law (no extra re-enable).
+    // The token faces the same gates as SetMode: an unknown law, or one
+    // this arm cannot run, refuses the whole command with unsupported_mode.
+    // While a mode state is moving, an enable that would land in ENABLED is
+    // answered rejected_moving and resent like Enable().
     Result Enable(ControlMode mode, std::chrono::milliseconds timeout = kEnableTimeout);
 
     // Target streams (best_effort, newest wins). The value reports this
@@ -158,7 +167,11 @@ public:
     // joint targets. Sending a target never changes the mode. Gripper targets
     // act in the three mode states; body targets depend on those components
     // being configured, and the body component applies its own state rules on
-    // top of that.
+    // top of that. A joint target whose `sequence` is 0 goes out with this
+    // robot's own increasing number instead: the robot drops frames whose
+    // sequence does not advance, and a caller that does not run an ordering
+    // scheme of its own gets that protection for free. A non-zero sequence
+    // is sent as given.
     Result SendJointMITTarget(const msg::JointMITTarget& target);
     Result SendJointCSPTarget(const msg::JointCSPTarget& target);
     Result SendJointPositionTarget(const msg::JointPositionTarget& target);
@@ -242,9 +255,13 @@ private:
     Result CallRunCommand(const std::string& command, const std::string& mode,
                           std::chrono::milliseconds timeout, msg::RunCommandResponse& receipt);
     // Shared body of the two Enable overloads: one `enable` request carrying
-    // `mode` (a field the robot does not read), then a wait for ENABLED,
-    // resending while the robot answers rejected_moving.
+    // `mode` (empty = the family's auto-detected hold law), then a wait for
+    // ENABLED, resending while the robot answers rejected_moving.
     Result EnableWithMode(const std::string& mode, std::chrono::milliseconds timeout);
+    // Next target sequence: a per-robot counter seeded from the monotonic
+    // clock on the first frame. The counter never hands out 0, which means
+    // "unset" on the wire.
+    uint32_t NextSequence();
     Result WaitForFsmState(const std::string& expected, std::chrono::milliseconds timeout);
     // One command whose accepted receipt names the state it lands in, followed
     // by WaitForFsmState; a refusal becomes a failure naming the robot's code
@@ -279,6 +296,10 @@ private:
         run_command_cli_;
 
     Telemetry telemetry_;
+    // Target frames sent without a caller-supplied sequence take their
+    // number from here; one counter serves all three joint target streams,
+    // which is enough because each stream has a single publisher.
+    std::atomic<uint32_t> sequence_{0};
     // Dedicated mutex for fsm_cv_: the predicate reads the fsm_state sample
     // cache under its own lock, so this mutex guards no shared data.
     std::mutex fsm_wait_mutex_;

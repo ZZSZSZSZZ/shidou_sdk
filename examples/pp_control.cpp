@@ -1,8 +1,9 @@
 // PP 关节示例：每条臂的末端电机从当前位置走一个来回（+0.3 rad 再回原位）。
 // PP 的轮廓规划在驱动侧完成，所以每程只发一帧终点位置，不逐周期插值；
-// 灵足与 EYOU 两族臂都支持 PP。
+// 每帧带上速度上限与加速度，力矩上限取机器人端配置。灵足与 EYOU 两族臂都支持 PP。
 //
-// 流程：查询状态与臂型 → 进入 PP → 逐电机走一个来回 → 切回 ENABLED。
+// 流程：查询状态与臂型 → Enable(PP) → SetMode(PP) → 逐电机走一个来回 → Enable(PP)
+// 回 ENABLED。
 //
 // 用法：pp_control [<ip>:<port>] [namespace]
 
@@ -18,8 +19,21 @@
 
 namespace {
 
-constexpr std::chrono::milliseconds kSegmentWait{1000};  // 每程发完后等驱动走完轮廓
-constexpr double kAmplitude = 0.3;  // 单程摆幅 rad（示例值，可按需调整）
+// 轮廓参数随每帧目标下发：velocity 是驱动侧规划用的速度上限，acceleration 是
+// 轮廓加速度。示例放慢到 0.5 rad/s、1.0 rad/s²，来回看得清也方便在机器人旁观察；
+// 不给这两个参数时取机器人端 position.velocity / position.acceleration，通常更快。
+// 力矩上限留空（0 = 未提供），仍取机器人端 position.torque——它是安全限值，
+// 示例不覆盖。
+constexpr double kAmplitude = 0.3;             // 单程摆幅 rad（示例值）
+constexpr double kProfileVelocity = 0.5;       // 速度上限 rad/s（示例值）
+constexpr double kProfileAcceleration = 1.0;   // 轮廓加速度 rad/s²（示例值）
+
+// 单程轮廓的理论时长：梯形速度曲线下 = 距离/速度 + 速度/加速度；距离短、到不了
+// 速度上限的三角形曲线也以该值为上界。再乘余量，等驱动真正走完这一段。
+constexpr double kSegmentSeconds =
+    kAmplitude / kProfileVelocity + kProfileVelocity / kProfileAcceleration;
+constexpr double kSegmentWaitMargin = 1.25;
+constexpr std::chrono::duration<double> kSegmentWait{kSegmentSeconds * kSegmentWaitMargin};
 
 // 解析十进制非负整数；arm_info 的自由度段用它读取。
 bool ParseInt(const std::string& text, int& value) {
@@ -90,16 +104,20 @@ double CurrentPosition(const shidou::robot::RobotState& state, uint32_t motor_id
 }
 
 // 单电机走一个来回：start → start + kAmplitude → start。每程只发一帧终点位置，
-// 由驱动侧规划整段轮廓；速度、力矩上限与加速度取机器人端配置。返回 false 表示
-// 下发失败，错误消息已打印。
+// 由驱动侧按帧里的速度上限与加速度规划整段轮廓；力矩上限取机器人端配置。
+// 返回 false 表示下发失败，错误消息已打印。
 bool SweepMotor(shidou::robot::Robot& robot, uint32_t motor_id, double start) {
     const double peak = start + kAmplitude;
-    std::printf("motor %u: %.3f -> %.3f -> %.3f\n", motor_id, start, peak, start);
+    std::printf(
+        "motor %u: %.3f -> %.3f -> %.3f (velocity %.2f rad/s, acceleration %.2f rad/s^2)\n",
+        motor_id, start, peak, start, kProfileVelocity, kProfileAcceleration);
     for (const double position : {peak, start}) {
-        // 只填电机号与位置；其余字段留空 = 取机器人端配置。
+        // 位置是终点，速度与加速度决定驱动侧的轮廓；力矩上限留空 = 取机器人端配置。
         shidou::msg::JointPositionTarget target;
         target.motor_ids = {motor_id};
         target.positions = {position};
+        target.velocities = {kProfileVelocity};
+        target.accelerations = {kProfileAcceleration};
         const shidou::robot::Result sent = robot.SendJointPositionTarget(target);
         if (!sent) {
             std::printf("SendJointPositionTarget: %s\n", sent.message.c_str());
@@ -140,18 +158,22 @@ int SweepJoints(shidou::robot::Robot& robot) {
         motors.push_back(static_cast<uint32_t>(layout.right_dof + 7));
     }
 
-    // Enable 落点始终是 ENABLED；PP 由 SetMode 进入（先停驱动再重新使能）。
+    // 先使能，并把保持律选成 PP：落点仍是 ENABLED，只是停住时由驱动的位置闭环
+    // 保持实测位置（不锁定目标，被推开就停在新位置）。从 STOP 出发必须走这一步：
+    // STOP 下 SetMode 回 busy，因为模式态自己不会使能。
     const shidou::robot::Result enabled = robot.Enable(shidou::robot::ControlMode::kPp);
     if (!enabled) {
         std::printf("Enable(PP): %s\n", enabled.message.c_str());
         return 1;
     }
-    const shidou::robot::Result mode = robot.SetMode(shidou::robot::ControlMode::kPp);
-    if (!mode) {
-        std::printf("SetMode(PP): %s\n", mode.message.c_str());
+    // 再切 PP 状态：保持律已经是 PP，SetMode 只剩状态迁移，不再重复那段停驱动 →
+    // 写电机模式 → 重新使能的序列。切换排队到当前运动停稳后执行。
+    const shidou::robot::Result switched = robot.SetMode(shidou::robot::ControlMode::kPp);
+    if (!switched) {
+        std::printf("SetMode(PP): %s\n", switched.message.c_str());
         return 1;
     }
-    // 状态由 set_mode 回执后刷新，确认已进入 PP。
+    // 打印状态，确认已在 PP。
     std::printf("fsm_state=%s\n", robot.FsmState().c_str());
 
     for (uint32_t motor_id : motors) {
@@ -160,10 +182,12 @@ int SweepJoints(shidou::robot::Robot& robot) {
         }
     }
 
-    // 回到 ENABLED；机械臂未停稳时 Enable 自动重发。
+    // 回到 ENABLED：同样带上 PP 词元，停住时由驱动位置闭环保持实测位置，不会弹回
+    // 扫动前的位置。最后一程刚结束时手臂可能还在动，机器人回 rejected_moving，
+    // Enable 自动重发，停稳后落到 ENABLED。
     const shidou::robot::Result held = robot.Enable(shidou::robot::ControlMode::kPp);
     if (!held) {
-        std::printf("Enable: %s\n", held.message.c_str());
+        std::printf("Enable(PP): %s\n", held.message.c_str());
         return 1;
     }
     // 打印最终状态，确认回到 ENABLED。

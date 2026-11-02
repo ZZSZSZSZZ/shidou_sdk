@@ -40,9 +40,10 @@ feedback       : seq=... age=... ms
 
 `body_info` 给出轮组、顶杆等身体部件的配置；每个电机的 `mode` 是机器人正在用的驱动
 模式，`confidence` 是设备读回置信度——只有 `confirmed` 表示设备确认处在所报模式，
-`requested` / `unknown` 下设备可能仍停在旧模式。在 ENABLED 阻尼态，`mode` 是按电机
-家族自动识别的默认模式（灵足 mit、EYOU csp、其它 pp），所以刚跑完 `pp_control`
-再查通常会看到 mit：那是回到阻尼态的结果，不是切换失败。`feedback` 的 `age` 是最近一帧关节
+`requested` / `unknown` 下设备可能仍停在旧模式。ENABLED 里跑的保持律也报在这个字段：
+不带词元使能时是按电机家族自动识别的默认模式（灵足 mit、EYOU csp、其它 pp），
+带词元使能（`Enable(PP)`）时就是该律——`pp_control` 收尾用 `Enable(PP)`，所以
+刚跑完再查会看到 pp。`feedback` 的 `age` 是最近一帧关节
 反馈的年龄，刚开始运行时可能还是 `none yet`，等一两百毫秒再运行一次。查询失败时示例
 打印 SDK 返回的错误并以退出码 1 结束。
 
@@ -60,22 +61,25 @@ feedback       : seq=... age=... ms
 
 ## 3. 认识状态机：set_fsm
 
-机器人有五个状态：`STOP`（失能）、`ENABLED`（阻尼保持），以及三个模式态
+机器人有五个状态：`STOP`（失能）、`ENABLED`（保持停住），以及三个模式态
 `MIT` / `CSP` / `PP`。`set_fsm` 演示 STOP 与 ENABLED 之间的切换，**不会产生运动**：
 
 ```bash
 ./set_fsm
 ```
 
-它先打印当前状态；当前不在 ENABLED 时先调用 `Enable()` 进入阻尼保持，等待 1 秒，
-再调用 `Stop()` 回到失能，每次切换后打印新的 `fsm_state`。`ENABLED` 是阻尼保持：
-电机通电、跟手有阻尼，但不会自己动。
+它先打印当前状态；当前不在 ENABLED 时先调用 `Enable()` 进入保持态，等待 1 秒，
+再调用 `Stop()` 回到失能，每次切换后打印新的 `fsm_state`。`ENABLED` 里电机通电、
+原地停住、不会自己动：不带词元时保持律按臂型自动判定——灵足为速度阻尼（跟手有
+阻尼），EYOU csp、其它 pp 由驱动的位置闭环按实测位置停住。
 
 ## 4. 第一次运动：pp_control
 
 `pp_control` 对每条臂的末端电机做一次来回：从当前位置走 `+0.3 rad`，再回到原位，
 结束后切回 `ENABLED`。PP 是轮廓位置模式，规划在驱动侧完成，所以每程只发一帧
-终点位置，不逐周期插值。灵足与 EYOU 两族臂都支持 PP。
+终点位置，不逐周期插值；每帧带上速度上限与加速度（示例 0.5 rad/s、1.0 rad/s²，
+单程轮廓约 1.1 秒，等 1.4 秒再发下一程），力矩上限留给机器人端配置。灵足与
+EYOU 两族臂都支持 PP。
 
 **运行即动作**：先清空机械臂活动范围，并确认手臂已安装、有支撑；双臂机型两侧会同时动。
 
@@ -84,8 +88,9 @@ feedback       : seq=... age=... ms
 ```
 
 输出依次是 `arm_info` 与当前 `fsm_state`、解析出的臂型与自由度、每条臂每个电机的
-`起始 -> 峰值 -> 起始`。扫动结束机械臂回到开始时的位置。示例不对位置做判定：是否真的
-跟上了目标，用 `get_joint` 观察反馈；限位与安全策略在机器人端，被丢下的目标不会产生运动。
+`起始 -> 峰值 -> 起始`（带这次轮廓的速度上限与加速度）。扫动结束机械臂回到开始时
+的位置。示例不对位置做判定：是否真的跟上了目标，用 `get_joint` 观察反馈；限位与
+安全策略在机器人端，被丢下的目标不会产生运动。
 
 ## 5. 其余三个运动示例
 
@@ -122,12 +127,17 @@ feedback       : seq=... age=... ms
 
 1. **目标只在对应模式态生效**：MIT 目标只在 FSM 状态为 `MIT` 时被接受，CSP 与 PP
    同理；模式态与驱动模式要同时匹配。
-2. **目标不切换模式**：切模式只能经 `set_mode`（机器人端 `run_command` 服务）。
-   切换是一段失能序列（停驱动 → 写电机模式 → 重新使能），机械臂短暂失去力矩；
-   STOP 下先 `Enable()`，否则 `set_mode` 回 `busy`。`Enable(mode)` 不是切换：
-   机器人不读 `enable` 的模式字段，落点仍是 `ENABLED`。
-3. **ENABLED 是阻尼保持**：既不是「松手」，也不是「保持位置」；要保持位置就在 CSP
-   或 PP 模式下持续下发目标。
+2. **目标不切换模式**：切模式只能经 `run_command` 服务，而且进入模式态只有
+   `SetMode(mode)` 一条路——它排队到当前运动停稳后执行，执行时是一段失能序列
+   （写电机模式 → 切换 → 重新使能），机械臂短暂失去力矩。`Enable(mode)` 不是
+   捷径：落点恒为 `ENABLED`，词元选的只是停在原地时跑哪个控制律——mit 速度阻尼，
+   csp / pp 由驱动的位置闭环按实测位置保持。先带同一个词元使能，再 `SetMode(mode)`
+   时切换只剩状态迁移，不走那段失能序列。STOP 下 `SetMode` 回 `busy`，所以从 STOP
+   或 ENABLED 进模式态要走两步：先 `Enable()`（或 `Enable(mode)`），再
+   `SetMode(mode)`。
+3. **ENABLED 不跟目标**：不带词元时是阻尼保持，跟手有阻尼但不会自己动；带 csp / pp
+   词元时由驱动按实测位置停住（不锁定目标，被推开就停在新位置）。无论哪种，ENABLED
+   都不接收关节目标；要按指令运动就在 CSP 或 PP 模式下持续下发目标。
 4. **能力按臂型裁剪**：灵足臂支持 MIT / CSP / PP，EYOU 臂支持 CSP / PP；不支持的
    模式会被拒绝（`unsupported_mode`），示例打印错误并退出。
 5. **轮组有 500 ms 死区**：机器人端 500 ms 收不到新的轮速目标就把轮速归零。
@@ -186,8 +196,9 @@ print(state.fsm_state, state.motor_ids)
   核对本手册「动手之前」的默认值，再用 `get_state` 单独排查。
 - **连上了但等不到样本**：最常见的原因是 namespace 对不上；桥未启用 namespace 时
   要显式传空串 `""`。
-- **`SetMode(MIT): unsupported_mode`（或其它 `SetMode(...)` 回执）**：该臂型
-  不支持这个模式。灵足臂用 `mit_control`，两族臂都可以用 `pp_control`。
+- **`Enable(MIT): ... unsupported_mode` 或 `SetMode(MIT): ... unsupported_mode`**：
+  该臂型不支持这个模式（EYOU 臂只有 csp / pp；`Enable(mode)` 的保持律与
+  `SetMode` 过同一道能力门）。灵足臂用 `mit_control`，两族臂都可以用 `pp_control`。
 - **`no position for pushrod motor 17`**：顶杆不在 `joint_states` 里。确认机型带顶杆、
   机器人节点已启动，并先用 `get_state` 看 `body_info`。
 - **电机不按预期运动**：先用 `get_joint` 观察位置反馈，确认 FSM 状态与模式态；注意

@@ -91,7 +91,7 @@ Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁
 | `get_joint` | 每 500 ms 打印一帧关节反馈，共 10 帧、5 秒；逐电机打印位置、速度、力矩、使能、在线、报警码与温度 | `get_joint [<ip>:<port>] [namespace]` |
 | `set_fsm` | 打印当前状态，演示 Enable 与 Stop | `set_fsm [<ip>:<port>] [namespace]` |
 | `mit_control` | 每臂末端电机做 MIT 位置来回：当前位置 → `+0.3 rad` → 原位（各 1 秒，100 Hz） | `mit_control [<ip>:<port>] [namespace]` |
-| `pp_control` | 每臂末端电机做 PP（轮廓位置）来回：当前位置 → `+0.3 rad` → 原位（每程只发一帧终点位置） | `pp_control [<ip>:<port>] [namespace]` |
+| `pp_control` | 每臂末端电机做 PP（轮廓位置）来回：当前位置 → `+0.3 rad` → 原位（每程只发一帧终点位置，帧里带速度上限与加速度） | `pp_control [<ip>:<port>] [namespace]` |
 | `pushrod_control` | 使能模式下把顶杆送到目标位置（mm），随后打印 5 秒位置反馈 | `pushrod_control [target_mm] [<ip>:<port>] [namespace]` |
 | `chassis_control` | 轮组正转 2 秒 → 停 1.5 秒 → 反转 2 秒，结束后切回 ENABLED | `chassis_control [<ip>:<port>] [namespace]` |
 
@@ -101,11 +101,16 @@ Windows 运行示例时依赖 `zenohc.dll`（构建时会自动复制到 exe 旁
   20 mm/s、50 mm/s² 的轮廓执行。示例不对到位做判定。
 - `chassis_control` 在段内按固定周期持续下发轮速：机器人侧 500 ms 收不到新消息就把轮速归零，
   发一帧就等不会产生运动。
-- 关节目标只在对应的模式态（MIT / CSP / PP）生效，目标不会切换模式；模式切换用 `SetMode`
-  （机器人端 `run_command` 服务；切换时机器人先停驱动、写电机模式、再重新使能，机械臂短暂
-  失去力矩；STOP 下先 `Enable()`）。`Enable(mode)` 不是切换：机器人不读 `enable` 的模式
-  字段，落点仍是 ENABLED 阻尼保持。能力按臂型裁剪：
-  灵足支持 mit / csp / pp，EYOU 支持 csp / pp，不支持的模式会被拒绝（`unsupported_mode`）。
+- 关节目标只在对应的模式态（MIT / CSP / PP）生效，目标不会切换模式；模式切换只能经
+  机器人端的 `run_command` 服务，且进入模式态只有 `SetMode(mode)` 一条路：它排队到当前
+  运动停稳后执行，执行时机器人先停驱动、写电机模式、再重新使能，机械臂短暂失去力矩。
+  `Enable(mode)` 不是进模式态的捷径——落点恒为 ENABLED，词元选的是停在原地时跑的控制律
+  （mit 速度阻尼，csp / pp 由驱动位置闭环按实测位置保持）；先 `Enable(mode)` 再
+  `SetMode(mode)` 时切换只剩状态迁移，不走那段失能序列。STOP 下 `set_mode` 回 `busy`，
+  所以从 STOP 或 ENABLED 进模式态是两步：先 `Enable()`（可带同一个词元），再
+  `SetMode(mode)`。能力按臂型裁剪：
+  灵足支持 mit / csp / pp，EYOU 支持 csp / pp，不支持的模式会被拒绝（`unsupported_mode`，
+  `SetMode` 与带同名词元的 `Enable` 都过这道门）。
   `pp_control` 用的 PP 两族臂都支持（`mit_control` 只适用于灵足臂）。
 - `mit_control` / `pp_control` / `pushrod_control` / `chassis_control` 会下发模式切换与运动目标，
   运行前请确保机器人周围安全。
@@ -124,12 +129,16 @@ C++17、第三方依赖与 zenoh 链接项随 `shidou::core` 自动传播。
 
 // 地址与 namespace 是标识一台机器人的那一对；句柄自开会话，随作用域关闭。
 shidou::robot::Robot robot("<robot-ip>:7447", "robot168");
-// robot.Ready() / Enable() / SetMode() / SendJoint*Target() / SendBodyTarget() /
-// GetRobotState()
+// robot.Ready() / Enable() / Enable(mode) / SetMode() / SendJoint*Target() /
+// SendBodyTarget() / GetRobotState()
 ```
 
 ## 注意事项
 
+- 关节目标结构体带 `sequence`（目标序号）：`Send*Target` 在调用方留 0 时自动逐帧编号，
+  机器人据此丢弃乱序迟到的旧帧；自行填非零值时原样发出——该值必须逐帧递增，且一个话题
+  只应有一个发布者。自己构造帧时必须包含这 4 字节（目标帧比 3.5.1 及更早的机器人多出
+  `sequence`，两端不能混用同一目标话题）
 - 预编译库为 Release-only，由 GitHub Actions 流水线构建，Windows 两个基线与 Linux
   分列：Windows x64 为 VS2022（v143 工具集）；Windows ARM64 为 VS2026（MSVC 14.51
   工具集——该 arm64 镜像不提供 VS2022，无法与 x64 侧对齐）；Linux 两个架构

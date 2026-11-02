@@ -1,4 +1,5 @@
-// 状态机最小切换：先进入 ENABLED（阻尼保持：电机通电、跟手有阻尼但不会自己动），
+// 状态机最小切换：先进入 ENABLED（保持态：电机通电、原地停住、不会自己动；
+// 不带词元时保持律按臂型自动判定——灵足为速度阻尼、EYOU / 其它为位置保持），
 // 再 Stop() 回失能。全程不下发运动目标。
 //
 // 流程：查询当前状态 → 不在 ENABLED 时 Enable → 等 1 秒 → Stop。
@@ -40,7 +41,7 @@ int main(int argc, char** argv) {
             return 1;
         }
         std::printf("fsm_state=%s\n", robot.FsmState().c_str());
-        // 留 1 秒观察阻尼保持，再退回失能。
+        // 留 1 秒观察保持态，再退回失能。
         std::this_thread::sleep_for(std::chrono::seconds(1));
     }
 

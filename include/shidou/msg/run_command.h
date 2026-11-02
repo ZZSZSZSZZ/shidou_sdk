@@ -3,9 +3,10 @@
 // run_command service: the robot's only source of control modes.
 //
 // Request:
-//   command = "enable"   enable and hold in damping; the mode field is
-//                        ignored (the robot still runs the command and says
-//                        so in the receipt)
+//   command = "enable"   enable and hold in ENABLED; `mode` optionally names
+//                        the hold law (mit / csp / pp); empty = the family's
+//                        auto-detected law. An unknown or unsupported law
+//                        refuses the whole command.
 //             "disable"  disable immediately; always accepted
 //             "set_mode" enter the mode named in `mode` (mit / csp / pp),
 //                        queued until the current motion settles
@@ -22,7 +23,7 @@ namespace shidou::msg {
 
 struct RunCommandRequest {
     std::string command;
-    std::string mode; // set_mode only; empty for enable / disable
+    std::string mode; // set_mode's target, or enable's hold law; empty = unset
 
     static constexpr size_t kCdrAlignment = 4;
 

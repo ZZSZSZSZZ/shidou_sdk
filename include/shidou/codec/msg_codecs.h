@@ -42,37 +42,41 @@ inline bool JointFeedback::Decode(codec::ReadCursor& in) {
 }
 
 inline bool JointCSPTarget::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteSeq(out, motor_ids) && codec::WriteSeq(out, positions) &&
-           codec::WriteSeq(out, velocities) && codec::WriteSeq(out, torques);
+    return codec::WriteU32Aligned(out, sequence) && codec::WriteSeq(out, motor_ids) &&
+           codec::WriteSeq(out, positions) && codec::WriteSeq(out, velocities) &&
+           codec::WriteSeq(out, torques);
 }
 
 inline bool JointCSPTarget::Decode(codec::ReadCursor& in) {
-    return codec::ReadSeq(in, motor_ids) && codec::ReadSeq(in, positions) &&
-           codec::ReadSeq(in, velocities) && codec::ReadSeq(in, torques);
+    return codec::ReadU32Aligned(in, sequence) && codec::ReadSeq(in, motor_ids) &&
+           codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
+           codec::ReadSeq(in, torques);
 }
 
 inline bool JointPositionTarget::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteSeq(out, motor_ids) && codec::WriteSeq(out, positions) &&
-           codec::WriteSeq(out, velocities) && codec::WriteSeq(out, torques) &&
-           codec::WriteSeq(out, accelerations);
+    return codec::WriteU32Aligned(out, sequence) && codec::WriteSeq(out, motor_ids) &&
+           codec::WriteSeq(out, positions) && codec::WriteSeq(out, velocities) &&
+           codec::WriteSeq(out, torques) && codec::WriteSeq(out, accelerations);
 }
 
 inline bool JointPositionTarget::Decode(codec::ReadCursor& in) {
-    return codec::ReadSeq(in, motor_ids) && codec::ReadSeq(in, positions) &&
-           codec::ReadSeq(in, velocities) && codec::ReadSeq(in, torques) &&
-           codec::ReadSeq(in, accelerations);
+    return codec::ReadU32Aligned(in, sequence) && codec::ReadSeq(in, motor_ids) &&
+           codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
+           codec::ReadSeq(in, torques) && codec::ReadSeq(in, accelerations);
 }
 
 inline bool JointMITTarget::Encode(codec::WriteBuffer& out) const {
-    return codec::WriteSeq(out, motor_ids) && codec::WriteSeq(out, positions) &&
-           codec::WriteSeq(out, velocities) && codec::WriteSeq(out, torques) &&
-           codec::WriteSeq(out, kps) && codec::WriteSeq(out, kds);
+    return codec::WriteU32Aligned(out, sequence) && codec::WriteSeq(out, motor_ids) &&
+           codec::WriteSeq(out, positions) && codec::WriteSeq(out, velocities) &&
+           codec::WriteSeq(out, torques) && codec::WriteSeq(out, kps) &&
+           codec::WriteSeq(out, kds);
 }
 
 inline bool JointMITTarget::Decode(codec::ReadCursor& in) {
-    return codec::ReadSeq(in, motor_ids) && codec::ReadSeq(in, positions) &&
-           codec::ReadSeq(in, velocities) && codec::ReadSeq(in, torques) &&
-           codec::ReadSeq(in, kps) && codec::ReadSeq(in, kds);
+    return codec::ReadU32Aligned(in, sequence) && codec::ReadSeq(in, motor_ids) &&
+           codec::ReadSeq(in, positions) && codec::ReadSeq(in, velocities) &&
+           codec::ReadSeq(in, torques) && codec::ReadSeq(in, kps) &&
+           codec::ReadSeq(in, kds);
 }
 
 inline bool BodyTarget::Encode(codec::WriteBuffer& out) const {
