@@ -34,7 +34,10 @@
 #include <mutex>
 #include <string>
 
+// session.hxx first: it pulls in zenoh_configure.h, which defines the
+// extension feature macros that gate the ext headers below.
 #include <zenoh/api/session.hxx>
+#include <zenoh/api/ext/session_ext.hxx>
 
 #include "shidou/comm/error.h"
 #include "shidou/comm/keyexpr.h"
@@ -129,8 +132,7 @@ public:
         // undeclares (and synchronizes with in-flight callbacks) before
         // any other member dies, so the pointer stays valid.
         auto sub = std::shared_ptr<ZenohSubscriber<T>>(
-            new ZenohSubscriber<T>(session, keyexpr, std::move(callback),
-                                   zenoh::interop::detail::null<zenoh::Subscriber<void>>()));
+            new ZenohSubscriber<T>(session, keyexpr, std::move(callback)));
         try {
             zenoh::KeyExpr ke(keyexpr);
             auto raw = sub.get();
@@ -141,6 +143,53 @@ public:
             raw->ReplaceSubscriber(std::move(declared));
         } catch (const zenoh::ZException& e) {
             SetError(ErrorCode::kSessionError, std::string("declare_subscriber: ") + e.what());
+            return nullptr;
+        }
+        return sub;
+    }
+
+    // Creates a subscriber that also asks matching publishers for their
+    // retained history (zenoh-ext advanced subscriber). Use it for snapshot
+    // topics such as robot_description: a plain subscriber only receives
+    // samples published while it is matched, so a late subscriber misses the
+    // retained value whenever another subscriber already keeps the robot
+    // bridge's DDS reader alive. The callback and threading contract match
+    // CreateSubscriber.
+    template <typename T>
+    std::shared_ptr<ZenohSubscriber<T>> CreateRetainedSubscriber(
+        const std::string& topic, typename ZenohSubscriber<T>::Callback callback,
+        const RetainedSubscriberOptions& opts = {}) {
+        std::string keyexpr;
+        if (!BuildKeyexpr(topic, false, keyexpr)) {
+            return nullptr;
+        }
+        const auto session = Session();
+        if (!session) {
+            SetError(ErrorCode::kNotInitialized, "session is not open");
+            return nullptr;
+        }
+        auto sub = std::shared_ptr<ZenohSubscriber<T>>(
+            new ZenohSubscriber<T>(session, keyexpr, std::move(callback)));
+        try {
+            zenoh::KeyExpr ke(keyexpr);
+            auto raw = sub.get();
+            auto options = zenoh::ext::SessionExt::AdvancedSubscriberOptions::create_default();
+            auto& history = options.history.emplace();
+            // The bridge enables publisher detection for transient-local
+            // routes, so a subscriber that starts before the publisher can
+            // still fetch the retained sample once the publisher appears.
+            history.detect_late_publishers = true;
+            history.max_samples = opts.max_samples;
+            history.max_age_ms = static_cast<uint64_t>(opts.max_age.count());
+            options.query_timeout_ms = static_cast<uint64_t>(opts.query_timeout.count());
+            zenoh::ext::AdvancedSubscriber<void> declared =
+                session->ext().declare_advanced_subscriber(
+                    ke, [raw](const zenoh::Sample& sample) { raw->OnSample(sample); }, []() {},
+                    std::move(options));
+            raw->ReplaceSubscriber(std::move(declared));
+        } catch (const zenoh::ZException& e) {
+            SetError(ErrorCode::kSessionError,
+                     std::string("declare_advanced_subscriber: ") + e.what());
             return nullptr;
         }
         return sub;

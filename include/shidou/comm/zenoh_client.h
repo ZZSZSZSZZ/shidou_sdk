@@ -5,6 +5,8 @@
 // a query payload and the reply carries the response, both in the topic
 // frame (CDR encapsulation header + body). The bridge correlates each
 // query with its reply internally, so the SDK needs no request id.
+// A reply above the transport's batch size arrives fragmented, so its
+// payload is materialized into one buffer before decoding.
 //
 // Threading contract: Call blocks the calling thread until a reply
 // arrives or the timeout elapses. It must NOT be called from a zenoh
@@ -29,6 +31,7 @@
 #include "shidou/comm/error.h"
 #include "shidou/comm/options.h"
 #include "shidou/comm/wire_codec.h"
+#include "shidou/comm/zenoh_payload.h"
 #include "shidou/logging.h"
 
 namespace shidou::comm {
@@ -65,6 +68,7 @@ private:
             std::mutex mutex;  // guards decoded and undecodable
             std::atomic<bool> done{false};
             bool undecodable = false;  // an ok reply the decoder rejected
+            size_t undecodable_size = 0;  // payload size of that reply
         };
         auto state = std::make_shared<CallState>();
         auto future = state->promise.get_future();
@@ -90,15 +94,15 @@ private:
                         return;
                     }
                     TRes candidate;
-                    const zenoh::Bytes& payload = reply.get_ok().get_payload();
-                    auto view = payload.get_contiguous_view();
-                    if (!view || !DecodeServiceReply(view->data, view->len, candidate)) {
+                    const ContiguousPayload payload(reply.get_ok().get_payload());
+                    if (!DecodeServiceReply(payload.data(), payload.size(), candidate)) {
                         // An ok reply the decoder rejected. Remember it so the
                         // request that saw it can end as a decode failure
                         // instead of as "no reply"; a later decodable reply
                         // still wins.
                         std::lock_guard<std::mutex> lock(state->mutex);
                         state->undecodable = true;
+                        state->undecodable_size = payload.size();
                         return;
                     }
                     {
@@ -135,7 +139,16 @@ private:
         }
         const ErrorCode code = future.get();
         if (code != ErrorCode::kOk) {
-            return Fail(code, code == ErrorCode::kDecodeError ? "reply decode failed" : "no reply");
+            if (code == ErrorCode::kDecodeError) {
+                size_t size = 0;
+                {
+                    std::lock_guard<std::mutex> lock(state->mutex);
+                    size = state->undecodable_size;
+                }
+                return Fail(code, "reply decode failed (" + std::to_string(size) +
+                                      "-byte payload)");
+            }
+            return Fail(code, "no reply");
         }
         {
             std::lock_guard<std::mutex> lock(state->mutex);

@@ -146,7 +146,8 @@ shidou::robot::Robot robot("<robot-ip>:7447", "robot168");
 - 一架构一目录：Windows x64 用 `lib/win/` 与 `bin/win/`，Windows ARM64 用
   `lib/win-arm64/` 与 `bin/win-arm64/`，Linux 两个架构用 `lib/linux/` 与
   `lib/linux-arm64/`，跨架构混用会在链接期失败
-- 版本对应 tag；Release 页提供该版本树的 tar.gz / zip 归档
+- 版本对应 tag；Release 页提供该版本树的 `shidou-sdk-cpp-<version>.tar.gz` 归档，
+  以及 `.sha256` / `.sha512` 校验和文件
 
 ## 许可
 

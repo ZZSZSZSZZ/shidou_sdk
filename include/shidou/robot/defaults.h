@@ -14,6 +14,10 @@ constexpr std::chrono::milliseconds kStopTimeout{5000};
 // the budget has to cover that wait as well as the state transition itself.
 constexpr std::chrono::milliseconds kModeSwitchTimeout{10000};
 constexpr std::chrono::milliseconds kGetStateTimeout{5000};
+// One asset fetch is one service round trip. The default matches the state
+// query; a caller fetching a large asset over a slow link can override it per
+// call.
+constexpr std::chrono::milliseconds kGetAssetTimeout{5000};
 
 // Enable() resends an `enable` that the robot answered with rejected_moving
 // (the arm is still moving in a mode state) at this interval, until its own

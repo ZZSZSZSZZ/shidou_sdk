@@ -3,6 +3,7 @@
 // Configuration and per-role options for the comm layer.
 
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -60,6 +61,23 @@ struct PubOptions {
 struct ClientOptions {
     // How long Call waits for a reply before reporting kTimeout.
     std::chrono::milliseconds timeout = std::chrono::seconds(5);
+};
+
+// Options for the retained-sample subscriber flavour
+// (ZenohSession::CreateRetainedSubscriber). They describe the history query
+// sent to a publisher that keeps a cache for transient-local topics.
+struct RetainedSubscriberOptions {
+    // Cached samples to request from each publisher. Description snapshots
+    // are complete values, so the latest one is enough.
+    size_t max_samples = 1;
+
+    // Oldest sample to accept, relative to its publication time. Zero
+    // means no age limit.
+    std::chrono::milliseconds max_age{0};
+
+    // How long the history query may take before it is abandoned. Keeps a
+    // late subscriber from stalling on an unresponsive publisher.
+    std::chrono::milliseconds query_timeout = std::chrono::seconds(3);
 };
 
 } // namespace shidou::comm

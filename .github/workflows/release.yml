@@ -2,9 +2,10 @@ name: release
 
 # Tag releases: validate the committed prebuilt tree on all three
 # payloads (Windows x64, Linux x86_64 and aarch64) by calling ci.yml --
-# configure, build examples, consumer smoke -- then attach archives of
-# the tagged tree (headers + prebuilt libs + examples; no SDK source) to
-# the GitHub Release of the pushed tag.
+# configure, build examples, consumer smoke -- then attach the tagged tree
+# archive (headers + prebuilt libs + examples; no SDK source) as
+# shidou-sdk-cpp-<version>.tar.gz, with .sha256 and .sha512 files, to the
+# GitHub Release of the pushed tag.
 
 on:
   push:
@@ -29,25 +30,29 @@ jobs:
 
       - name: Archive tagged tree
         run: |
-          git archive --format=tar.gz -o shidou_sdk-$GITHUB_REF_NAME.tar.gz HEAD
-          git archive --format=zip -o shidou_sdk-$GITHUB_REF_NAME.zip HEAD
+          set -eu
+          version="${GITHUB_REF_NAME#v}"
+          asset="shidou-sdk-cpp-${version}.tar.gz"
+          git archive --format=tar.gz -o "$asset" HEAD
+          sha256sum "$asset" > "$asset.sha256"
+          sha512sum "$asset" > "$asset.sha512"
 
       # A re-pushed tag (the fix path for a bad tree) reaches this step with
       # the release already present, and create would then fail on it;
-      # refreshing the archives in place keeps the release equal to the tag.
+      # refreshing the assets in place keeps the release equal to the tag.
       - name: Create or refresh the release with tree archives
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -eu
+          version="${GITHUB_REF_NAME#v}"
+          asset="shidou-sdk-cpp-${version}.tar.gz"
           if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME" >/dev/null 2>&1; then
             gh release upload "$GITHUB_REF_NAME" \
-              "shidou_sdk-$GITHUB_REF_NAME.tar.gz" \
-              "shidou_sdk-$GITHUB_REF_NAME.zip" \
+              "$asset" "$asset.sha256" "$asset.sha512" \
               --clobber --repo "$GITHUB_REPOSITORY"
           else
             gh release create "$GITHUB_REF_NAME" \
-              "shidou_sdk-$GITHUB_REF_NAME.tar.gz" \
-              "shidou_sdk-$GITHUB_REF_NAME.zip" \
+              "$asset" "$asset.sha256" "$asset.sha512" \
               --generate-notes --repo "$GITHUB_REPOSITORY"
           fi

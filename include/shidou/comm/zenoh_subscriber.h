@@ -1,9 +1,12 @@
 #pragma once
 
-// Type-safe subscriber with a last-value cache (approximating the
-// transient_local semantics of the robot-side joint_states publisher:
-// the SDK keeps its own latest sample instead of relying on zenoh
-// history).
+// Type-safe subscriber with a last-value cache, mirroring the
+// transient-local semantics the robot-side publishers expose: the SDK
+// always keeps its own latest sample. A topic whose publisher retains a
+// sample for late joiners (robot_description) is declared through
+// ZenohSession::CreateRetainedSubscriber, which fetches the publisher's
+// history in addition to the live stream; the cache here behaves the same
+// either way.
 //
 // Threading contract:
 //   - the user callback runs on a zenoh session thread: it must not
@@ -21,6 +24,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include <zenoh/api/sample.hxx>
 #include <zenoh/api/session.hxx>
@@ -28,9 +32,32 @@
 
 #include "shidou/comm/error.h"
 #include "shidou/comm/wire_codec.h"
+#include "shidou/comm/zenoh_payload.h"
 #include "shidou/logging.h"
 
 namespace shidou::comm {
+
+namespace detail {
+
+// Type-erased owner of a declared zenoh subscriber. The wrapper only needs
+// to keep the subscription alive and undeclare it on destruction, so it can
+// own either a plain subscriber or a history-capable advanced subscriber
+// without naming the zenoh-ext type in this header.
+class SubscriptionOwner {
+public:
+    virtual ~SubscriptionOwner() = default;
+};
+
+template <typename Subscriber>
+class SubscriptionOwnerOf final : public SubscriptionOwner {
+public:
+    explicit SubscriptionOwnerOf(Subscriber subscriber) : subscriber_(std::move(subscriber)) {}
+
+private:
+    Subscriber subscriber_;
+};
+
+} // namespace detail
 
 template <typename T>
 class ZenohSubscriber {
@@ -79,19 +106,14 @@ public:
 private:
     friend class ZenohSession;
 
-    ZenohSubscriber(std::shared_ptr<zenoh::Session> session, std::string topic, Callback callback,
-                    zenoh::Subscriber<void> subscriber)
-        : session_(std::move(session)),
-          topic_(std::move(topic)),
-          callback_(std::move(callback)),
-          subscriber_(std::move(subscriber)) {}
+    ZenohSubscriber(std::shared_ptr<zenoh::Session> session, std::string topic, Callback callback)
+        : session_(std::move(session)), topic_(std::move(topic)), callback_(std::move(callback)) {}
 
     // Runs on a zenoh session thread.
     void OnSample(const zenoh::Sample& sample) {
         T msg;
-        const zenoh::Bytes& payload = sample.get_payload();
-        auto view = payload.get_contiguous_view();
-        if (!view || !DecodeTopicFrame(view->data, view->len, msg)) {
+        const ContiguousPayload payload(sample.get_payload());
+        if (!DecodeTopicFrame(payload.data(), payload.size(), msg)) {
             ++decode_errors_;
             ReportError(ErrorCode::kDecodeError, "decode failed on " + topic_);
             return;
@@ -111,7 +133,10 @@ private:
 
     // Called once by the session after a successful declaration. Must
     // precede any sample delivery for this object.
-    void ReplaceSubscriber(zenoh::Subscriber<void> subscriber) { subscriber_ = std::move(subscriber); }
+    template <typename Subscriber>
+    void ReplaceSubscriber(Subscriber subscriber) {
+        subscriber_ = std::make_unique<detail::SubscriptionOwnerOf<Subscriber>>(std::move(subscriber));
+    }
 
     // Destruction order matters: subscriber_ is declared last, so it is
     // destroyed first. Undeclaring is synchronized with in-flight
@@ -128,7 +153,7 @@ private:
     std::mutex error_mutex_;
     std::function<void(ErrorCode)> error_handler_;
     std::chrono::steady_clock::time_point last_error_ts_;
-    zenoh::Subscriber<void> subscriber_;
+    std::unique_ptr<detail::SubscriptionOwner> subscriber_;
 };
 
 template <typename T>

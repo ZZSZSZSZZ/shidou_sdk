@@ -8,6 +8,7 @@
 
 #include "shidou/codec/cdr.h"
 #include "shidou/msg/body_target.h"
+#include "shidou/msg/get_asset.h"
 #include "shidou/msg/get_state.h"
 #include "shidou/msg/gripper_target.h"
 #include "shidou/msg/joint_csp_target.h"
@@ -126,6 +127,27 @@ inline bool RunCommandResponse::Encode(codec::WriteBuffer& out) const {
 inline bool RunCommandResponse::Decode(codec::ReadCursor& in) {
     return codec::ReadBool(in, accepted) && codec::ReadString(in, code) &&
            codec::ReadString(in, message);
+}
+
+inline bool GetAssetRequest::Encode(codec::WriteBuffer& out) const {
+    return codec::WriteString(out, uri);
+}
+
+inline bool GetAssetRequest::Decode(codec::ReadCursor& in) {
+    return codec::ReadString(in, uri);
+}
+
+inline bool GetAssetResponse::Encode(codec::WriteBuffer& out) const {
+    // ok is one byte; WriteString aligns to 4, so it lands after the padding
+    // ROS serialization puts between a bool and a string field. The byte
+    // sequence's length word is 4-aligned the same way.
+    return codec::WriteBool(out, ok) && codec::WriteString(out, error) &&
+           codec::WriteSeq(out, data);
+}
+
+inline bool GetAssetResponse::Decode(codec::ReadCursor& in) {
+    return codec::ReadBool(in, ok) && codec::ReadString(in, error) &&
+           codec::ReadSeq(in, data);
 }
 
 inline bool GetStateRequest::Encode(codec::WriteBuffer& out) const {

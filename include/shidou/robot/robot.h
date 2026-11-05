@@ -12,27 +12,30 @@
 // (see ZenohSession). Construction does not throw either way: check Ready()
 // afterwards, then LastError() for why not.
 //
-// Threading: Enable/Enable(mode)/Stop/SetMode/GetRobotState block the calling
-// thread (client and condition-variable waits) and must not run on zenoh
-// session threads. The Send* methods are thread-safe, but only one control
-// thread should stream targets at a time. One failure value names the call
-// that returned it only while the comm object behind it serves no other call
-// at that moment: that is what the single-control-thread rule gives the target
-// streams, and why the blocking methods are meant to be driven one call at a
-// time per object (two GetRobotState calls share one client; Enable,
-// Enable(mode), Stop and SetMode share the run_command client). Callbacks
-// passed to the Set*Callback hooks run on zenoh session threads: do not block
-// and do not call the blocking methods from them. SetNamespace rebuilds all
-// comm objects: call it only with no other operation on this robot in flight, and
-// never from zenoh session threads.
+// Threading: Enable/Enable(mode)/Stop/SetMode/GetRobotState/
+// FetchDescriptionAsset block the calling thread (client and
+// condition-variable waits) and must not run on zenoh session threads. The
+// Send* methods are thread-safe, but only one control thread should stream
+// targets at a time. One failure value names the call that returned it only
+// while the comm object behind it serves no other call at that moment: that is
+// what the single-control-thread rule gives the target streams, and why the
+// blocking methods are meant to be driven one call at a time per object (two
+// GetRobotState calls share one client; two FetchDescriptionAsset calls share
+// one client; Enable, Enable(mode), Stop and SetMode share the run_command
+// client). Callbacks passed to the Set*Callback hooks run on zenoh session
+// threads: do not block and do not call the blocking methods from them.
+// SetNamespace rebuilds all comm objects: call it only with no other operation
+// on this robot in flight, and never from zenoh session threads.
 
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <vector>
 
 #include "shidou/codec/msg_codecs.h"
 #include "shidou/comm/options.h"
@@ -62,6 +65,14 @@ inline constexpr const char* kTargetBody = "arm_control_node/target_body";
 inline constexpr const char* kServiceGetState = "arm_control_node/get_state";
 // The robot's only source of control modes (enable / disable / set_mode).
 inline constexpr const char* kServiceRunCommand = "arm_control_node/run_command";
+// The robot's URDF text (std_msgs/String). Unlike the control topics it has
+// no arm_control_node/ prefix: the description unit publishes it at the
+// namespace root, and the ros2dds bridge replays the retained sample to a
+// subscriber when it matches.
+inline constexpr const char* kRobotDescription = "robot_description";
+// Description asset endpoint: one asset per request, addressed by the opaque
+// URI the description snapshot carries.
+inline constexpr const char* kServiceGetAsset = "robot_description/get_asset";
 } // namespace topics
 
 // Identity of one target stream: the topic it goes to and the reliability
@@ -182,11 +193,42 @@ public:
     // value reports this call: "not ready", or the client's failure.
     Result GetRobotState(RobotState& out, std::chrono::milliseconds timeout = kGetStateTimeout);
 
+    // Fetches one description asset through the robot-side endpoint. `uri` is
+    // opaque: it is sent byte for byte as it appeared in the description
+    // snapshot, with no parsing, path joining or safety checks on this side;
+    // the endpoint interprets it and owns those checks. On success `out` holds
+    // the asset bytes and replaces whatever it held before. The value reports
+    // this call: "not ready" (kNotInitialized), the client's transport failure
+    // (no reply, timeout, decode failure, lost session), or a refusal the
+    // endpoint reported inside its reply (kInternal, with the robot-side
+    // reason in the message). Nothing is cached here: every call is one
+    // round trip, and caching or invalidating assets is the caller's.
+    Result FetchDescriptionAsset(const std::string& uri, std::vector<uint8_t>& out,
+                                 std::chrono::milliseconds timeout = kGetAssetTimeout);
+
     // Telemetry hooks; see the class comment for threading rules.
     void SetJointFeedbackCallback(std::function<void(const msg::JointFeedback&)> cb);
     void SetFsmStateCallback(std::function<void(const std::string&)> cb);
     void SetFeedbackStaleCallback(std::chrono::milliseconds age_threshold_ms,
                                   std::function<void(double age_ms)> cb);
+
+    // Description snapshot: the robot's URDF text as published on
+    // robot_description, newest sample only and never parsed. Empty until a
+    // sample arrives and after SetNamespace until the new side publishes: the
+    // description is optional metadata, so a robot without a description unit
+    // stays ready and serves an empty snapshot. Safe from any thread.
+    std::string RobotDescription() const {
+        msg::String description;
+        if (description_sub_ == nullptr || !description_sub_->LastValue(description)) {
+            return {};
+        }
+        return description.data;
+    }
+    // Hook for description updates; runs on a zenoh session thread and
+    // receives the text verbatim (see the class comment for the callback
+    // rules). A malformed sample never reaches it: the subscriber drops it
+    // and records the decode failure in the sticky diagnostic.
+    void SetRobotDescriptionCallback(std::function<void(const std::string&)> cb);
 
     // Telemetry snapshot accessors (safe from any thread; a namespace
     // switch excludes all concurrent calls, as stated in the class
@@ -270,6 +312,7 @@ private:
                           const std::string& expected, std::chrono::milliseconds timeout);
     void OnFeedback(const msg::JointFeedback& fb);  // zenoh session thread
     void OnFsmState(const msg::String& state);      // zenoh session thread
+    void OnDescription(const msg::String& description);  // zenoh session thread
     // The value of every operation that runs while the robot is not ready:
     // one wording for one condition, so a caller can tell "called too early"
     // from a link failure by code as well as by text.
@@ -285,6 +328,7 @@ private:
     std::shared_ptr<comm::ZenohSession> session_;
     std::shared_ptr<comm::ZenohSubscriber<msg::JointFeedback>> feedback_sub_;
     std::shared_ptr<comm::ZenohSubscriber<msg::String>> fsm_sub_;
+    std::shared_ptr<comm::ZenohSubscriber<msg::String>> description_sub_;
     std::shared_ptr<comm::ZenohPublisher<msg::JointMITTarget>> mit_pub_;
     std::shared_ptr<comm::ZenohPublisher<msg::JointCSPTarget>> csp_pub_;
     std::shared_ptr<comm::ZenohPublisher<msg::JointPositionTarget>> pos_pub_;
@@ -294,8 +338,15 @@ private:
         get_state_cli_;
     std::shared_ptr<comm::ZenohClient<msg::RunCommandRequest, msg::RunCommandResponse>>
         run_command_cli_;
+    std::shared_ptr<comm::ZenohClient<msg::GetAssetRequest, msg::GetAssetResponse>>
+        get_asset_cli_;
 
     Telemetry telemetry_;
+    // Description hook: the sample thread copies the function out under this
+    // mutex and invokes it after releasing, so replacing the hook never waits
+    // for a running callback and a callback may read RobotDescription().
+    std::mutex description_callback_mutex_;
+    std::function<void(const std::string&)> description_callback_;
     // Target frames sent without a caller-supplied sequence take their
     // number from here; one counter serves all three joint target streams,
     // which is enough because each stream has a single publisher.
